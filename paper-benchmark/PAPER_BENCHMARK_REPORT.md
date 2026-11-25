@@ -38,3 +38,4 @@ To ensure our scientific claims withstand hostile peer review:
 - [fig2_security_det_curve.png](figures/fig2_security_det_curve.png) — Security-Usability Log-FAR DET curves
 - [fig3_sensor_geometry.png](figures/fig3_sensor_geometry.png) — Sensor geometry ablation (`64×80` vs `150×52` vs `96×96`)
 - [fig4_speed_pareto.png](figures/fig4_speed_pareto.png) — Cold-start CPU latency & accuracy Pareto frontier
+- [fig5_live_hardware_replay.png](figures/fig5_live_hardware_replay.png) — Anonymized live physical capacitive hardware replay (`4` participants, `8` fingers, `288` genuine + `2,016` cross-impostor trials, `0` false accepts)

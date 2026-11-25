@@ -43,6 +43,8 @@ dual-guide/results/
 screenshots/
 *.png
 !paper-benchmark/figures/*.png
+!docs/assets/*.png
+!docs/assets/*.svg
 *.log
 *.bak
 *.tmp
