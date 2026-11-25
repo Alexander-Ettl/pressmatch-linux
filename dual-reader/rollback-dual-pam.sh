@@ -7,10 +7,10 @@ if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
 fi
 
 BACKUP_DIR="/var/backups/pressmatch-dual-pam"
-for f in common-auth sddm polkit-1 sddm-autologin; do
+for f in common-auth sddm gdm-fingerprint polkit-1 sddm-autologin; do
   if [[ -f "$BACKUP_DIR/$f.pre-dual" ]]; then
     cp -a "$BACKUP_DIR/$f.pre-dual" "/etc/pam.d/$f"
-  elif [[ "$f" != "sddm-autologin" ]]; then
+  elif [[ "$f" != "sddm-autologin" && -f "/etc/pam.d/$f" ]]; then
     sed -i 's/pam_pressmatch_dual\.so/pam_fprintd.so/g' "/etc/pam.d/$f"
   fi
 done

@@ -16,7 +16,7 @@ Run the included safe installer directly:
 ```bash
 sudo bash dual-reader/install-dual-pam.sh
 ```
-This installs `pam_pressmatch_dual.so` to `/usr/lib/x86_64-linux-gnu/security/`, wires `common-auth`, `sddm`, `kde-fingerprint`, `polkit-1`, and (when ELAN `04f3:0c6e` is present) configures One-Touch Power-On `sddm-autologin` + `systemd-sleep` Software SSO.
+This installs `pam_pressmatch_dual.so` to `/usr/lib/x86_64-linux-gnu/security/`, automatically enables fingerprint auth in `/etc/pam.d/common-auth` (via `pam-auth-update --enable fprintd` if not yet enabled, with a safe `sufficient` fallback above `pam_unix.so`) so **`sudo`** and login work out-of-the-box on fresh installs, and wires `sddm`/`gdm-fingerprint`, `kde-fingerprint`, `polkit-1`, and (when ELAN `04f3:0c6e` is present) One-Touch Power-On `sddm-autologin` + `systemd-sleep` Software SSO.
 
 Rollback anytime:
 ```bash

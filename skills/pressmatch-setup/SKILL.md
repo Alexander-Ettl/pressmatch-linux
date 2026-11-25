@@ -54,7 +54,7 @@ Install only what is missing for the user's distro:
 - **Ubuntu / Debian:**
   ```bash
   sudo apt-get update && sudo apt-get install -y \
-    git gcc g++ meson ninja-build pkg-config fprintd libfprint-2-2 \
+    git gcc g++ meson ninja-build pkg-config fprintd libfprint-2-2 libpam-fprintd \
     libglib2.0-dev libgusb-dev libpixman-1-dev libnss3-dev libgudev-1.0-dev \
     libpam0g-dev libusb-1.0-0-dev python3-pyqt6 python3-dbus
   ```

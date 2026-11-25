@@ -31,7 +31,7 @@ EOF
 echo "=== [2/4] Backing up current PAM files to $BACKUP_DIR ==="
 mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"
-for f in /etc/pam.d/common-auth /etc/pam.d/sddm /etc/pam.d/polkit-1 /etc/pam.d/sddm-autologin; do
+for f in /etc/pam.d/common-auth /etc/pam.d/sddm /etc/pam.d/gdm-fingerprint /etc/pam.d/polkit-1 /etc/pam.d/sddm-autologin; do
   bn="$(basename "$f")"
   if [[ -f "$f" && ! -f "$BACKUP_DIR/$bn.pre-dual" ]]; then
     cp -a "$f" "$BACKUP_DIR/$bn.pre-dual"
@@ -64,9 +64,37 @@ SLEEP_EOF
   chmod 755 /usr/lib/systemd/system-sleep/pressmatch-elan-sso
 fi
 
-echo "=== [4/5] Wiring simultaneous dual-reader PAM into common-auth, SDDM, KDE lockscreen, and Polkit ==="
-sed -i 's/pam_fprintd\.so/pam_pressmatch_dual.so/g' /etc/pam.d/common-auth
-sed -i 's/pam_fprintd\.so/pam_pressmatch_dual.so/g' /etc/pam.d/sddm
+echo "=== [4/5] Wiring simultaneous dual-reader PAM into common-auth (sudo), SDDM/GDM, KDE lockscreen, and Polkit ==="
+if [[ -f /etc/pam.d/common-auth ]]; then
+  if ! grep -qE 'pam_(fprintd|pressmatch_dual)\.so' /etc/pam.d/common-auth; then
+    if [[ -f /usr/share/pam-configs/fprintd ]] && command -v pam-auth-update >/dev/null 2>&1; then
+      DEBIAN_FRONTEND=noninteractive pam-auth-update --enable fprintd || true
+    fi
+  fi
+  if grep -q 'pam_fprintd\.so' /etc/pam.d/common-auth; then
+    sed -i 's/pam_fprintd\.so/pam_pressmatch_dual.so/g' /etc/pam.d/common-auth
+  elif ! grep -q 'pam_pressmatch_dual\.so' /etc/pam.d/common-auth; then
+    # Safe jump-independent fallback when fprintd PAM profile isn't enabled yet:
+    # insert 'sufficient' directly above pam_unix.so so sudo & login get fingerprint + intact password fallback.
+    python3 - /etc/pam.d/common-auth <<'PY'
+import re, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+src = p.read_text(encoding="utf-8")
+m = re.search(r'(?m)^auth[ \t]+.*pam_unix\.so.*$', src)
+assert m, "pam_unix.so line not found in /etc/pam.d/common-auth"
+line = "auth\tsufficient\tpam_pressmatch_dual.so max-tries=1 timeout=10\n"
+p.write_text(src[:m.start()] + line + src[m.start():], encoding="utf-8")
+PY
+  fi
+fi
+
+if [[ -f /etc/pam.d/sddm ]]; then
+  sed -i 's/pam_fprintd\.so/pam_pressmatch_dual.so/g' /etc/pam.d/sddm
+fi
+if [[ -f /etc/pam.d/gdm-fingerprint ]]; then
+  sed -i 's/pam_fprintd\.so/pam_pressmatch_dual.so/g' /etc/pam.d/gdm-fingerprint
+fi
 
 if [[ -f /usr/lib/pam.d/kde-fingerprint ]]; then
   sed 's/pam_fprintd\.so.*/pam_pressmatch_dual.so max-tries=5 timeout=-1/' /usr/lib/pam.d/kde-fingerprint > /etc/pam.d/kde-fingerprint
@@ -119,7 +147,11 @@ SDDM_EOF
   chmod 644 /etc/sddm.conf.d/30-pressmatch-poweron.conf
 fi
 
-grep -n "pam_pressmatch_dual" /etc/pam.d/common-auth /etc/pam.d/sddm /etc/pam.d/kde-fingerprint /etc/pam.d/polkit-1 /etc/pam.d/sddm-autologin
+PAM_CHECK=()
+for f in /etc/pam.d/common-auth /etc/pam.d/sddm /etc/pam.d/gdm-fingerprint /etc/pam.d/kde-fingerprint /etc/pam.d/polkit-1 /etc/pam.d/sddm-autologin; do
+  [[ -f "$f" ]] && PAM_CHECK+=("$f")
+done
+grep -n "pam_pressmatch_dual" "${PAM_CHECK[@]}" || true
 
 cat <<EOF
 
