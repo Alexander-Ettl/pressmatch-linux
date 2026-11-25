@@ -1,0 +1,9 @@
+{
+  "width": 96, "height": 96,
+  "avg_kp": 298.80, "avg_stitched": 11.04, "template_kb": 368.37,
+  "v2_p50_ms": 34.209, "v2_p95_ms": 38.999,
+  "v40_p50_ms": 34.765, "v40_p95_ms": 39.775,
+  "v41_p50_ms": 34.939, "v41_p95_ms": 39.967,
+  "extract_p50_ms": 24.395, "deser_p50_ms": 0.114, "pg_match_p50_ms": 9.754,
+  "zncc_rigid_p50_ms": 0.720, "zncc_elastic_p50_ms": 0.983
+}

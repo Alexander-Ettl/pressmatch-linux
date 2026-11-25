@@ -1,0 +1,110 @@
+# =============================================================================
+# PressMatch — Strict Privacy, Biometric & Build Artifact .gitignore
+# =============================================================================
+
+# --- Private biometric data, raw fingerprint frames, personal notes & profiles ---
+**/profiles/
+profiles/
+**/LIVE_PROFILES_REPORT.md
+LIVE_PROFILES_REPORT.md
+RESEARCH_AND_FINDINGS.md
+**/live_*
+live_*
+paper-benchmark/crops_*.bin
+paper-benchmark/results/scores_*.csv
+far-benchmark/
+*.bin
+*.pgm
+*.ppm
+*.raw
+*.raw8
+*.raw16
+*.u8
+*.u8_64x80
+captures.jsonl
+*.fpt
+*.tpl
+
+# --- Proprietary vendor firmware, Windows driver extracts & upstream reference downloads ---
+**/ft9201_fw.h
+ft9201-ref/
+firmware/
+**/firmware/
+*.fw
+*.hex
+*.cab
+*.exe
+*.dll
+*.sys
+
+# --- Local run logs, screenshots & scratch files ---
+dual-guide/results/
+**/screenshots/
+screenshots/
+*.png
+!paper-benchmark/figures/*.png
+*.log
+*.bak
+*.tmp
+*.swp
+*~
+.DS_Store
+
+# --- Build outputs & upstream libfprint checkout (track ONLY PressMatch driver sources) ---
+build/
+dist/
+release-v4.1/source/*
+!release-v4.1/source/libfprint/
+release-v4.1/source/libfprint/*
+!release-v4.1/source/libfprint/drivers/
+release-v4.1/source/libfprint/drivers/*
+!release-v4.1/source/libfprint/drivers/elanpress.c
+!release-v4.1/source/libfprint/drivers/elanpress.h
+!release-v4.1/source/libfprint/drivers/elanpress-match.c
+!release-v4.1/source/libfprint/drivers/elanpress-match.h
+!release-v4.1/source/libfprint/drivers/elanpress-sift.c
+!release-v4.1/source/libfprint/drivers/elanpress-sift.h
+!release-v4.1/source/libfprint/drivers/ft9201/
+release-v4.1/source/libfprint/drivers/ft9201/*
+!release-v4.1/source/libfprint/drivers/ft9201/ft9201.c
+release-v4.1/v4.0-to-v4.1.patch
+release-v4.1/test_v41_asan
+
+# --- Compiled native binaries & shared libraries ---
+*.so
+*.so.*
+*.dylib
+*.o
+*.obj
+*.a
+*.elf
+a.out
+dual-reader/dual_unlock_test
+dual-reader/pressmatch-elan-sso
+paper-benchmark/raw_capture
+paper-benchmark/multi_algo_bench
+
+# --- Python & IDE caches ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.vscode/
+.idea/
+
+# --- Secrets, keys & environment files ---
+.ssh/
+**/.ssh/
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+id_ecdsa*
+id_dsa*
+*.ppk
+*credentials*
+*secret*
