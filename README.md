@@ -17,6 +17,22 @@
 
 ---
 
+## Automated AI Agent Setup (Portable Skill Included)
+
+Have a Linux laptop or USB reader with a small capacitive sensor? Hand this repository's portable Agent Skill ([`skills/pressmatch-setup/SKILL.md`](skills/pressmatch-setup/SKILL.md)) to **Claude Code, Codex CLI, Antigravity, Cursor, Gemini CLI, or any `SKILL.md`-compatible agent** — it will detect your exact sensor & Linux distro, compile PressMatch v4.1 cleanly from source, adapt to compatible ELAN/FocalTech PIDs if needed, wire PAM safely with password fallback preserved, install the Touch ID HUD & setup wizard, and walk you through enrollment:
+
+```bash
+git clone https://github.com/Alexander-Ettl/pressmatch-linux.git
+cd pressmatch-linux
+```
+
+Then tell your AI coding agent:
+> *"Use the `pressmatch-setup` skill in `skills/pressmatch-setup/SKILL.md` to detect my fingerprint reader, build and install PressMatch v4.1 cleanly on my system, wire up PAM and the Touch ID HUD, and verify everything works."*
+
+*(The repo also includes `.agents/skills/pressmatch-setup` for automatic workspace skill discovery.)*
+
+---
+
 > [!IMPORTANT]
 > **Why PressMatch v4.1?** Traditional open-source minutiae engines like **NIST NBIS (`mindtct`/`bozorth3`)** and **SourceAFIS** were engineered for large 500 DPI optical scanners and collapse on tiny laptop capacitive pads (**0.0%–0.2% TAR** for stock `libfprint` NBIS on `64×80`, `150×52`, and `96×96` sensors).
 >
@@ -153,7 +169,8 @@ Replaying identical lossless raw capacitive frames captured directly from physic
 | [`pressmatch-gui/`](pressmatch-gui/) | Native DE/EN PyQt6 setup app, Wayland floating HUD (`pressmatch_hud.py`), and Plasma 6 lockscreen pill (`lockscreen/PressMatchPill.qml`) |
 | [`paper-benchmark/`](paper-benchmark/) | Multi-algorithm C/Python benchmark harness, 300 DPI chart renderer, aggregate public results, and all 5 publication figures |
 | [`dual-guide/`](dual-guide/) | Local-only HTML guided dual-sensor capture & replay studio (strict loopback same-origin CSRF guard) |
-| [`docs/assets/`](docs/assets/) | Repository banner & authentic offscreen UI/HUD showcase visuals |
+| [`skills/pressmatch-setup/`](skills/pressmatch-setup/) | Portable AI Agent Skill (`SKILL.md`, `detect_hardware.sh`, `build_pressmatch.sh`, sensor porting & distro PAM guides) |
+| [`docs/assets/`](docs/assets/) | Swiss-editorial hardware banner & authentic offscreen UI/HUD showcase visuals |
 
 ---
 
