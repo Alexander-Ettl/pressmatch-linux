@@ -4,15 +4,15 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/PressMatch-v4.1-059669?style=for-the-badge&logo=linux&logoColor=white" alt="PressMatch v4.1" />
-  <img src="https://img.shields.io/badge/False%20Accepts-0%20%2F%201%2C216%2C800-10B981?style=for-the-badge" alt="0 / 1,216,800 False Accepts" />
-  <img src="https://img.shields.io/badge/Live--Scan%20TAR-95.9%25%20%40%201%2F50k%20FAR-0284C7?style=for-the-badge" alt="95.9% Live-Scan TAR" />
+  <img src="https://img.shields.io/badge/Observed%20FA-0%20%2F%20405%2C600%20per%20geom-10B981?style=for-the-badge" alt="0 / 405,600 Observed False Accepts per Geometry" />
+  <img src="https://img.shields.io/badge/Live--Scan%20TAR-95.9%25%20(74.4%25%20all%20DBs)-0284C7?style=for-the-badge" alt="95.9% Live-Scan TAR" />
   <img src="https://img.shields.io/badge/Cold%20CPU-4.7%C3%97%E2%80%935.4%C3%97%20Faster-7C3AED?style=for-the-badge" alt="4.7x-5.4x Faster" />
   <img src="https://img.shields.io/badge/Core-100%25%20Pure%20C%20%C2%B7%20Zero%20OpenCV-D97706?style=for-the-badge" alt="100% Pure C" />
   <img src="https://img.shields.io/badge/Desktop-Wayland%20%C2%B7%20KDE%20Plasma%206%20%C2%B7%20PAM-0EA5E9?style=for-the-badge" alt="Wayland & KDE Plasma 6" />
 </p>
 
 <p align="center">
-  <b>State-of-the-art pure-C open-source fingerprint matching for small-area capacitive Linux sensors</b> — uniting RootSIFT, 2D Pose-Graph Mosaic Stitching, Elastic ZNCC Verification, One-Touch Power-On SSO, Simultaneous Dual-Reader PAM, and a native Touch ID HUD.
+  <b>High-accuracy pure-C open-source fingerprint matching for small-area capacitive Linux sensors</b> — uniting RootSIFT, 2D Pose-Graph Mosaic Stitching, Elastic ZNCC Verification, One-Touch Power-On SSO, Simultaneous Dual-Reader PAM, and a native Touch ID HUD.
 </p>
 
 ---
@@ -36,21 +36,24 @@ Then tell your AI coding agent:
 > [!IMPORTANT]
 > **Why PressMatch v4.1?** Traditional open-source minutiae engines like **NIST NBIS (`mindtct`/`bozorth3`)** and **SourceAFIS** were engineered for large 500 DPI optical scanners and collapse on tiny laptop capacitive pads (**0.0%–0.2% TAR** for stock `libfprint` NBIS on `64×80`, `150×52`, and `96×96` sensors).
 >
-> For **small-area capacitive sensors inside pure-C Linux `libfprint`**, PressMatch v4.1 advances past both independent-frame SIFT matchers (**SIGFM / OpenCV**, **Upstream `elanpress` v0**) and legacy Windows-DLL wrappers by unifying **12 enrolled strips into a single 2D Pose-Graph fingertip mosaic** and verifying ridge geometry with **pixel-domain Elastic ZNCC (`±1 px`)** — delivering **`0 / 1,216,800` empirical false accepts** (`< 1 in 135,393` 95% Clopper-Pearson upper bound, surpassing Apple Touch ID's `1 in 50,000` standard) at **`95.9%` live-scan TAR** and **`20–35 ms` single-thread cold CPU latency** with **zero OpenCV, zero ML frameworks, and zero proprietary matching blobs**.
+> For **small-area capacitive sensors on CPU-only Linux devices (`libfprint`)**, PressMatch v4.1 unifies **12 enrolled strips into a single 2D Pose-Graph fingertip mosaic** and verifies ridge geometry with **pixel-domain Elastic ZNCC (`±1 px`)** in **100% pure C** (zero OpenCV, zero ML runtimes, zero proprietary matching blobs).
+>
+> **Statistical scope & transparency:** PressMatch v4.1 recorded **0 false accepts in 405,600 public-corpus impostor comparisons per tested geometry** (`74.4%` all-11-DB / `95.9%` live-scan subset TAR on `96×96`; `20.6–34.9 ms` median cold single-thread CPU — **`4.7×–5.4×` faster** than upstream `elanpress` v0). Because repeated crop comparisons share source identities and captures, these observations do **not** establish an independent-trial false-acceptance probability below `1 in 50,000`; we use `0.002%` solely as a nominal reference operating point while expanding head-to-head benchmarking against **JIPNet** and **SIGFM**.
 
 ---
 
 ## Open-Source Landscape Comparison
 
-How PressMatch v4.1 compares to existing open-source fingerprint matchers (honest scope: full-finger optical AFIS vs. small-area `≤ 96×96` capacitive Linux readers):
+How PressMatch v4.1 sits relative to existing open-source fingerprint matchers (direct head-to-head benchmarking against JIPNet and SIGFM on frozen identity-disjoint manifests is next on the roadmap):
 
-| Open-Source Engine | Best Target Sensor | Language & Deps | Matching Architecture | Small-Sensor `96×96` TAR (`FAR ≤ 1/50k`) | Published Impostor Proof | Cold CPU (12-Strip) | Full Linux Desktop Stack |
+| Open-Source Engine | Primary Target | Language & Runtime | Matching Architecture | Small-Sensor `96×96` Status | Reported Impostor Check | Cold CPU (12-Strip) | Full Linux Desktop Stack |
 |---|---|---|---|---:|---:|---:|---|
-| **PressMatch v4.1** *(this repo)* | **Small capacitive (`64×80`, `150×52`, `96×96`)** | **Pure C + AVX2 SIMD (zero OpenCV/ML)** | **RootSIFT + 2D Pose-Graph Mosaic + Elastic ZNCC + Quad-Tier Gate** | **95.9% Live** *(74.4% all-11-DB)* | **`0 / 1,216,800`** *(`< 1 in 135k` 95% UB)* | **`20.6–34.9 ms`** | **Drivers + Power-On SSO + Dual PAM + Touch ID HUD** |
-| **Upstream `elanpress` v0** | Small ELAN press sensors | Pure C (`libfprint`) | Independent-frame Lowe SIFT (`edge=10`) | 94.3% Live *(69.5% all-11-DB)* | `0 / 101,400` per geom | `100.9–186.9 ms` | Single-reader `libfprint` driver |
-| **Community SIGFM** (`libfprint !530`) | Small capacitive (`96×96`–`108×88`) | C++ + **OpenCV** | Independent-frame SIFT/AKAZE + Lowe ratio + pairwise geometry | ~90–95% *(setup-dependent)* | Community bench | Host OpenCV SIFT | `libfprint` matcher module only |
-| **Stock `libfprint` (NBIS)** | Large swipe / optical scanners | Pure C (NIST NBIS) | `mindtct` minutiae + `bozorth3` graph | **0.2%** *(0.0% on ELAN)* | `0 / 405,600` (rejects all) | `1.2–2.5 ms` | Stock `libfprint` + `fprintd` |
-| **SourceAFIS / `libAFIS`** | Full-sized 500 DPI optical scanners | Java / .NET *(community C port)* | Global ridge-minutiae constellation graph | Degrades sharply on tiny `≤96×96` patches | Strong on full-finger FVC | Full-print AFIS | Library only (no `libfprint`/PAM) |
+| **PressMatch v4.1** *(this repo)* | **Small capacitive (`64×80`, `150×52`, `96×96`)** | **Pure C + AVX2 SIMD (zero OpenCV/ML)** | **RootSIFT + 2D Pose-Graph Mosaic + Elastic ZNCC + Quad-Tier Gate** | **95.9% Live** *(74.4% all-11-DB, project-reported)* | **`0 / 405,600`** per geom *(correlated crops)* | **`20.6–34.9 ms`** | **Drivers + Power-On SSO + Dual PAM + Touch ID HUD** |
+| **Upstream `elanpress` v0** | Small ELAN press sensors | Pure C (`libfprint`) | Independent-frame Lowe SIFT (`edge=10`) | 94.3% Live *(69.5% all-11-DB, same harness)* | `0 / 101,400` per geom | `100.9–186.9 ms` | Single-reader `libfprint` driver |
+| **JIPNet** *(IEEE TIFS 2025)* | Partial fingerprint pairs (`96×96`–`160×160`) | Python + **PyTorch** (CNN/Transformer) | Pairwise neural verification & relative pose alignment | Published pairwise ref. *(head-to-head planned)* | Paper reports `0.1%` FMR | Neural pairwise *(K× per enroll)* | Research inference repo (no `libfprint`/PAM) |
+| **Community SIGFM** (`libfprint !530`) | Small capacitive (`96×96`–`108×88`) | C++ + **OpenCV** | Independent-frame SIFT/AKAZE + Lowe ratio + pairwise geometry | Community baseline *(head-to-head planned)* | Community bench | Host OpenCV SIFT | `libfprint` matcher module only |
+| **Stock `libfprint` (NBIS)** | Large swipe / optical scanners | Pure C (NIST NBIS) | `mindtct` minutiae + `bozorth3` graph | **0.2%** *(0.0% on ELAN, same harness)* | `0 / 405,600` *(rejects nearly all)* | `1.2–2.5 ms` | Stock `libfprint` + `fprintd` |
+| **SourceAFIS / `libAFIS`** | Full-sized 500 DPI optical scanners | Java / .NET *(community C port)* | Global ridge-minutiae constellation graph | Optimized for full prints; limited on tiny patches | Strong on full-finger FVC | Full-print AFIS | Library only (no `libfprint`/PAM) |
 
 ---
 
@@ -80,7 +83,7 @@ flowchart LR
         SIFT["RootSIFT Keypoints<br/>(L1 + sqrt Hellinger)"]
         PG["2D Pose-Graph Mosaic<br/>(12-Strip Spatial Stitching)"]
         ZNCC["Elastic Pixel ZNCC<br/>(±1 px · 4-bit Packed Frames)"]
-        GATE["Quad-Tier Decision Gate<br/>(0 / 1.2M+ FA · AVX2 SIMD)"]
+        GATE["Quad-Tier Decision Gate<br/>(0 / 405k per geom · AVX2 SIMD)"]
         SIFT --> PG --> ZNCC --> GATE
     end
 
@@ -111,11 +114,11 @@ flowchart LR
 
 ## Up-to-Date Scientific Benchmarks
 
-Evaluated across **11 public 500 DPI real human fingerprint corpora** (`206` distinct fingers, `1,648` impressions, **`1,216,800` impostor trials** across 3 physical sensor geometries, `7,416` held-out genuine trials) **plus** a **live physical capacitive hardware replay study** (`4` anonymized participants, `8` fingers, `288` genuine touches + `2,016` physical cross-impostors across real ELAN & FT9201 sensors).
+Evaluated across **11 public 500 DPI real human fingerprint corpora** (`206` distinct fingers, `1,648` impressions, `405,600` impostor comparisons per sensor geometry across `33,800` directed finger pairs, `2,472` held-out genuine comparisons per geometry) **plus** an initial **live physical capacitive hardware pilot** (`4` anonymized participants, `8` fingers, `96` genuine touches + `672` physical cross-impostor comparisons per sensor geometry on real ELAN & FT9201 hardware).
 
-### Master Public Corpus Matrix (`FAR ≤ 1 in 50,000` — Apple Touch ID Standard)
+### Master Public Corpus Matrix (Nominal `0.002%` / `1 in 50,000` Reference Target)
 
-| Sensor Geometry | Algorithm | TAR (All 11 DBs) | Live-Scan TAR (116 f.) | Shipped Empirical FAR | 95% Clopper-Pearson Bound | Cold CPU (p50) |
+| Sensor Geometry | Algorithm | TAR (All 11 DBs) | Live-Scan TAR (116 f.) | Observed Impostor FA | Naive i.i.d. 95% UB* | Cold CPU (p50) |
 |---|---|---:|---:|---:|---:|---:|
 | **FT9201 96×96** *(Native)* | Stock `libfprint` NBIS (`bozorth3`) | `0.2%` | `0.2%` | `0 / 405,600` | `< 1 in 135,393` | `2.5 ms` |
 | **FT9201 96×96** *(Native)* | Upstream `elanpress` v0 (Lowe SIFT) | `69.5%` | `94.3%` | `0 / 101,400` | `< 1 in 33,849` | `186.9 ms` |
@@ -127,8 +130,8 @@ Evaluated across **11 public 500 DPI real human fingerprint corpora** (`206` dis
 | **FT9201 64×80** *(DLL Crop)* | Upstream `elanpress` v0 (Lowe SIFT) | `58.4%` | `85.6%` | `0 / 101,400` | `< 1 in 33,849` | `100.9 ms` |
 | **FT9201 64×80** *(DLL Crop)* | **PressMatch v4.1 (Elastic ZNCC + Quad)** | **`63.6%`** | **`88.7%`** | **`0 / 405,600`** | **`< 1 in 135,393`** | **`20.6 ms` (4.9× faster)** |
 
-> [!TIP]
-> See [paper-benchmark/PAPER_BENCHMARK_REPORT.md](paper-benchmark/PAPER_BENCHMARK_REPORT.md) for the complete 18-row matrix, pessimistic independent finger-pair bounds (`N = 33,800` i.i.d. pairs → `< 1 in 11,267`), multi-finger `identify` scaling, and threats to validity.
+> [!NOTE]
+> **\*Statistical caveat:** The Clopper-Pearson values above assume independent Bernoulli trials and are shown for reference only. Because the `405,600` comparisons per geometry reuse `206` fingers (`33,800` unique directed finger pairs × `12` probe crops; sensitivity check at `N = 33,800` gives `< 1 in 11,283` and pairs still share identities), these results do **not** establish a certified or independent-trial false acceptance probability below `1 in 50,000` or equivalence to Apple Touch ID. See [paper-benchmark/PAPER_BENCHMARK_REPORT.md](paper-benchmark/PAPER_BENCHMARK_REPORT.md) for the full 18-row matrix, multi-finger `identify` scaling, and threats to validity.
 
 ### 1. Step-by-Step Algorithmic Evolution
 <p align="center">
