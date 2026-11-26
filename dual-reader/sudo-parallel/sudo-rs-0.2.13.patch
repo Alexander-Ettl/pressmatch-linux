@@ -1,0 +1,592 @@
+diff --git a/src/pam/converse.rs b/src/pam/converse.rs
+index d15a04e..5d1eec9 100644
+--- a/src/pam/converse.rs
++++ b/src/pam/converse.rs
+@@ -101,6 +101,7 @@ pub struct CLIConverser {
+     pub(super) bell: Cell<bool>,
+     pub(super) password_feedback: bool,
+     pub(super) password_timeout: Option<Duration>,
++    pub(super) quiet: bool,
+ }
+
+ use rpassword::Terminal;
+@@ -172,11 +173,17 @@ impl Converser for CLIConverser {
+     }
+
+     fn handle_error(&self, msg: &str) -> PamResult<()> {
++        if self.quiet {
++            return Ok(());
++        }
+         let (mut tty, _) = self.open()?;
+         Ok(tty.prompt(&format!("[{} error] {msg}\n", self.name))?)
+     }
+
+     fn handle_info(&self, msg: &str) -> PamResult<()> {
++        if self.quiet {
++            return Ok(());
++        }
+         let (mut tty, _) = self.open()?;
+         Ok(tty.prompt(&format!("[{}] {msg}\n", self.name))?)
+     }
+diff --git a/src/pam/mod.rs b/src/pam/mod.rs
+index b65d195..87d75a2 100644
+--- a/src/pam/mod.rs
++++ b/src/pam/mod.rs
+@@ -69,6 +69,7 @@ impl PamContext {
+             use_stdin,
+             password_feedback,
+             password_timeout,
++            quiet: false,
+         };
+
+         let c_service_name = CString::new(service_name)?;
+@@ -117,6 +118,12 @@ impl PamContext {
+         })
+     }
+
++    #[cfg(target_os = "linux")]
++    pub(crate) fn quiet_conversation(&mut self) {
++        // SAFETY: the converse data belongs to this PAM handle.
++        unsafe { (*self.data_ptr).converser.quiet = true };
++    }
++
+     pub fn set_auth_prompt(&mut self, prompt: Option<String>) {
+         // SAFETY: self.data_ptr was created by Box::into_raw
+         unsafe {
+diff --git a/src/sudo/pam.rs b/src/sudo/pam.rs
+index 5eb9344..6f23069 100644
+--- a/src/sudo/pam.rs
++++ b/src/sudo/pam.rs
+@@ -7,6 +7,10 @@ use crate::log::{dev_info, user_warn};
+ use crate::pam::{PamContext, PamError, PamErrorType, PamResult};
+ use crate::system::term::current_tty_name;
+
++#[cfg(target_os = "linux")]
++mod parallel;
++
++#[derive(Clone)]
+ pub(super) struct InitPamArgs<'a> {
+     pub(super) launch: LaunchType,
+     pub(super) use_askpass: bool,
+@@ -22,7 +26,31 @@ pub(super) struct InitPamArgs<'a> {
+     pub(super) hostname: &'a str,
+ }
+
+-pub(super) fn init_pam(
++pub(super) fn initialize_and_authenticate(
++    args: InitPamArgs<'_>,
++    tries: Option<u16>,
++    _invoking_user: bool,
++) -> Result<PamContext, Error> {
++    let stock = match args.launch {
++        LaunchType::Login if cfg!(feature = "pam-login") => "sudo-i",
++        LaunchType::Login | LaunchType::Shell | LaunchType::Direct => "sudo",
++    };
++    #[cfg(target_os = "linux")]
++    if let Some(tries) = tries.filter(|&tries| tries > 0 && _invoking_user) {
++        if let Some((password, terminal)) = parallel::configuration(&args, stock) {
++            return parallel::authenticate(args, stock, password, terminal, tries);
++        }
++    }
++    let auth_user = args.auth_user;
++    let non_interactive = args.non_interactive;
++    let mut pam = init_pam(args, stock)?;
++    if let Some(tries) = tries {
++        attempt_authenticate(&mut pam, auth_user, non_interactive, tries)?;
++    }
++    Ok(pam)
++}
++
++fn init_pam(
+     InitPamArgs {
+         launch,
+         use_askpass,
+@@ -37,11 +65,8 @@ pub(super) fn init_pam(
+         target_user,
+         hostname,
+     }: InitPamArgs,
++    service_name: &str,
+ ) -> PamResult<PamContext> {
+-    let service_name = match launch {
+-        LaunchType::Login if cfg!(feature = "pam-login") => "sudo-i",
+-        LaunchType::Login | LaunchType::Shell | LaunchType::Direct => "sudo",
+-    };
+     let mut pam = PamContext::new_cli(
+         "sudo",
+         service_name,
+diff --git a/src/sudo/pam/parallel.rs b/src/sudo/pam/parallel.rs
+new file mode 100644
+index 0000000..355caa9
+--- /dev/null
++++ b/src/sudo/pam/parallel.rs
+@@ -0,0 +1,125 @@
++use std::fs::symlink_metadata;
++use std::os::unix::fs::MetadataExt;
++
++use super::{InitPamArgs, attempt_authenticate, init_pam};
++use crate::common::Error;
++use crate::log::user_warn;
++use crate::pam::{PamContext, PamError, PamErrorType, PamResult};
++use crate::system::parallel_auth::{AttemptResult, AuthTerminal, AuthWorker, next_result};
++use crate::system::term::current_tty_name;
++
++const FINGERPRINT_SERVICE: &str = "sudo-pressmatch-fingerprint";
++const PASSWORD: usize = 0;
++
++pub(super) fn configuration(
++    args: &InitPamArgs<'_>,
++    stock: &str,
++) -> Option<(&'static str, AuthTerminal)> {
++    if args.non_interactive || args.use_askpass || args.use_stdin || current_tty_name().is_err() {
++        return None;
++    }
++    let password = if stock == "sudo-i" {
++        "sudo-pressmatch-password-i"
++    } else {
++        "sudo-pressmatch-password"
++    };
++    if !trusted_profile(password) || !trusted_profile(FINGERPRINT_SERVICE) {
++        return None;
++    }
++    Some((password, AuthTerminal::open_foreground().ok()?))
++}
++
++fn trusted_profile(service: &str) -> bool {
++    symlink_metadata(format!("/etc/pam.d/{service}")).is_ok_and(|metadata| {
++        metadata.is_file() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0
++    })
++}
++
++pub(super) fn authenticate(
++    args: InitPamArgs<'_>,
++    stock: &str,
++    password_service: &str,
++    terminal: AuthTerminal,
++    tries: u16,
++) -> Result<PamContext, Error> {
++    // Both workers start before any PAM work in their parent.
++    let fingerprint = AuthWorker::start(&terminal, true, || {
++        if fingerprint_pam(&args).is_ok() {
++            AttemptResult::Matched
++        } else {
++            AttemptResult::Exhausted
++        }
++    })
++    .map_err(PamError::from)?;
++    let password = AuthWorker::start(&terminal, false, || {
++        password_pam(args.clone(), password_service, tries)
++    })
++    .map_err(PamError::from)?;
++    let mut workers = [Some(password), Some(fingerprint)];
++
++    while workers.iter().any(Option::is_some) {
++        let outcome = next_result(&mut workers, &terminal);
++        let (index, result) = match outcome {
++            Ok(value) => value,
++            Err(error) => {
++                drop(workers);
++                terminal.restore(true).map_err(PamError::from)?;
++                return Err(PamError::from(error).into());
++            }
++        };
++        match result {
++            AttemptResult::Matched => {
++                drop(workers);
++                terminal
++                    .restore(index != PASSWORD)
++                    .map_err(PamError::from)?;
++                // The parent uses the original sudo PAM account and session policy.
++                return Ok(init_pam(args, stock)?);
++            }
++            AttemptResult::Failed if index == PASSWORD => break,
++            _ if index == PASSWORD && workers[1].is_some() => user_warn!(
++                "Password authentication ended. Scan your fingerprint or press Ctrl+C to cancel."
++            ),
++            _ => {}
++        }
++    }
++    drop(workers);
++    terminal.restore(true).map_err(PamError::from)?;
++    Err(PamError::Pam(PamErrorType::AuthError).into())
++}
++
++fn password_pam(args: InitPamArgs<'_>, service: &str, tries: u16) -> AttemptResult {
++    let user = args.auth_user;
++    let result = init_pam(args, service)
++        .map_err(Error::from)
++        .and_then(|mut pam| attempt_authenticate(&mut pam, user, false, tries));
++    match result {
++        Ok(()) => AttemptResult::Matched,
++        Err(Error::MaxAuthAttempts(_) | Error::Pam(PamError::TimedOut)) => AttemptResult::Exhausted,
++        Err(error) => {
++            user_warn!("{error}", error = error);
++            AttemptResult::Failed
++        }
++    }
++}
++
++fn fingerprint_pam(args: &InitPamArgs<'_>) -> PamResult<()> {
++    let mut pam = PamContext::new_cli(
++        "sudo",
++        FINGERPRINT_SERVICE,
++        false,
++        false,
++        false,
++        true,
++        false,
++        None,
++        Some(args.auth_user),
++    )?;
++    pam.quiet_conversation();
++    pam.mark_allow_null_auth_token(false);
++    pam.set_requesting_user(args.requesting_user)?;
++    if let Ok(tty) = current_tty_name() {
++        pam.set_tty(&tty)?;
++    }
++    pam.authenticate(args.auth_user)
++}
+diff --git a/src/sudo/pipeline.rs b/src/sudo/pipeline.rs
+index 31df9c0..5c64299 100644
+--- a/src/sudo/pipeline.rs
++++ b/src/sudo/pipeline.rs
+@@ -8,7 +8,7 @@ use crate::common::{Context, Error};
+ use crate::log::{auth_info, auth_warn};
+ use crate::pam::PamContext;
+ use crate::sudo::env::environment;
+-use crate::sudo::pam::{InitPamArgs, attempt_authenticate, init_pam, pre_exec};
++use crate::sudo::pam::{InitPamArgs, initialize_and_authenticate, pre_exec};
+ use crate::sudoers::{AuthenticatingUser, Authentication, Authorization, Judgement, Sudoers};
+ use crate::system::term::current_tty_name;
+ use crate::system::timestamp::{RecordScope, SessionRecordFile, TouchResult};
+@@ -173,31 +173,29 @@ fn auth_and_update_record_file(
+         prior_validity,
+     );
+
+-    let mut pam_context = init_pam(InitPamArgs {
+-        launch: context.launch,
+-        use_askpass: context.askpass,
+-        use_stdin: context.stdin,
+-        bell: context.bell,
+-        non_interactive: context.non_interactive,
+-        password_feedback: pwfeedback,
+-        password_timeout,
+-        auth_prompt: context.prompt.clone(),
+-        auth_user: &auth_user.name,
+-        requesting_user: &context.current_user.name,
+-        target_user: &context.target_user.name,
+-        hostname: &context.hostname,
+-    })?;
+-    if auth_status.must_authenticate {
+-        if context.non_interactive && !noninteractive_auth {
+-            return Err(Error::InteractionRequired);
+-        }
++    if auth_status.must_authenticate && context.non_interactive && !noninteractive_auth {
++        return Err(Error::InteractionRequired);
++    }
+
+-        attempt_authenticate(
+-            &mut pam_context,
+-            &auth_user.name,
+-            context.non_interactive,
+-            allowed_attempts,
+-        )?;
++    let pam_context = initialize_and_authenticate(
++        InitPamArgs {
++            launch: context.launch,
++            use_askpass: context.askpass,
++            use_stdin: context.stdin,
++            bell: context.bell,
++            non_interactive: context.non_interactive,
++            password_feedback: pwfeedback,
++            password_timeout,
++            auth_prompt: context.prompt.clone(),
++            auth_user: &auth_user.name,
++            requesting_user: &context.current_user.name,
++            target_user: &context.target_user.name,
++            hostname: &context.hostname,
++        },
++        auth_status.must_authenticate.then_some(allowed_attempts),
++        matches!(credential, AuthenticatingUser::InvokingUser),
++    )?;
++    if auth_status.must_authenticate {
+         if let (Some(record_file), Some(scope)) = (&mut auth_status.record_file, scope) {
+             match record_file.create(scope, &auth_user) {
+                 Ok(_) => (),
+diff --git a/src/system/mod.rs b/src/system/mod.rs
+index 77f41de..c810a68 100644
+--- a/src/system/mod.rs
++++ b/src/system/mod.rs
+@@ -24,6 +24,8 @@ use self::signal::SignalNumber;
+ pub(crate) mod audit;
+ // generalized traits for when we want to hide implementations
+ pub mod interface;
++#[cfg(target_os = "linux")]
++pub(crate) mod parallel_auth;
+
+ pub mod file;
+
+diff --git a/src/system/parallel_auth.rs b/src/system/parallel_auth.rs
+new file mode 100644
+index 0000000..d62f147
+--- /dev/null
++++ b/src/system/parallel_auth.rs
+@@ -0,0 +1,259 @@
++use std::fs::{File, OpenOptions};
++use std::io::{self, Read, Write};
++use std::mem::MaybeUninit;
++use std::os::fd::{AsRawFd, FromRawFd};
++use std::thread;
++use std::time::{Duration, Instant};
++
++use super::interface::ProcessId;
++use super::wait::{Wait, WaitError, WaitOptions};
++use super::{ForkResult, fork, kill};
++use crate::cutils::cerr;
++
++#[derive(Clone, Copy, Eq, PartialEq)]
++pub(crate) enum AttemptResult {
++    Matched = 1,
++    Exhausted = 2,
++    Failed = 3,
++}
++
++pub(crate) struct AuthTerminal {
++    tty: File,
++    original: libc::termios,
++    cancellation: Cancellation,
++}
++
++impl AuthTerminal {
++    pub(crate) fn open_foreground() -> io::Result<Self> {
++        let tty = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
++        let fd = tty.as_raw_fd();
++        let mut settings = MaybeUninit::uninit();
++        // SAFETY: fd is open, getpgrp takes no arguments, and tcgetattr initializes settings on success.
++        unsafe {
++            if cerr(libc::tcgetpgrp(fd))? != libc::getpgrp() {
++                return Err(io::Error::other(
++                    "sudo does not own the terminal foreground",
++                ));
++            }
++            cerr(libc::tcgetattr(fd, settings.as_mut_ptr()))?;
++            Ok(Self {
++                tty,
++                original: settings.assume_init(),
++                cancellation: Cancellation::new()?,
++            })
++        }
++    }
++
++    pub(crate) fn restore(&self, discard_input: bool) -> io::Result<()> {
++        let action = if discard_input {
++            libc::TCSAFLUSH
++        } else {
++            libc::TCSANOW
++        };
++        // SAFETY: the tty is still open and original was obtained from tcgetattr.
++        cerr(unsafe { libc::tcsetattr(self.tty.as_raw_fd(), action, &self.original) })?;
++        Ok(())
++    }
++}
++
++/// Block cancellation signals before forking. signalfd makes delivery race-free
++/// while the supervisor is waiting on both result pipes.
++struct Cancellation {
++    fd: File,
++    previous: libc::sigset_t,
++}
++
++impl Cancellation {
++    fn new() -> io::Result<Self> {
++        let mut mask = MaybeUninit::uninit();
++        let mut previous = MaybeUninit::uninit();
++        // SAFETY: sigemptyset and sigprocmask initialize writable sigset_t values.
++        unsafe {
++            cerr(libc::sigemptyset(mask.as_mut_ptr()))?;
++            let mut mask = mask.assume_init();
++            for signal in [libc::SIGINT, libc::SIGQUIT, libc::SIGTERM, libc::SIGHUP] {
++                cerr(libc::sigaddset(&mut mask, signal))?;
++            }
++            cerr(libc::sigprocmask(
++                libc::SIG_BLOCK,
++                &mask,
++                previous.as_mut_ptr(),
++            ))?;
++            let previous = previous.assume_init();
++            match cerr(libc::signalfd(
++                -1,
++                &mask,
++                libc::SFD_CLOEXEC | libc::SFD_NONBLOCK,
++            )) {
++                Ok(fd) => Ok(Self {
++                    fd: File::from_raw_fd(fd),
++                    previous,
++                }),
++                Err(error) => {
++                    let _ = libc::sigprocmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut());
++                    Err(error)
++                }
++            }
++        }
++    }
++
++    fn restore(&self) -> io::Result<()> {
++        // SAFETY: previous was initialized by sigprocmask.
++        cerr(unsafe {
++            libc::sigprocmask(libc::SIG_SETMASK, &self.previous, std::ptr::null_mut())
++        })?;
++        Ok(())
++    }
++
++    fn receive(&self) -> io::Result<i32> {
++        let mut info = MaybeUninit::<libc::signalfd_siginfo>::uninit();
++        let size = std::mem::size_of::<libc::signalfd_siginfo>();
++        // SAFETY: the fd is live and info is writable for size bytes.
++        let bytes =
++            cerr(unsafe { libc::read(self.fd.as_raw_fd(), info.as_mut_ptr().cast(), size) })?;
++        if bytes as usize != size {
++            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
++        }
++        // SAFETY: the full Linux signalfd record was read.
++        Ok(unsafe { info.assume_init() }.ssi_signo as i32)
++    }
++}
++
++impl Drop for Cancellation {
++    fn drop(&mut self) {
++        let _ = self.restore();
++    }
++}
++
++pub(crate) struct AuthWorker {
++    result: File,
++    pid: ProcessId,
++}
++
++impl AuthWorker {
++    /// Spawn only from sudo's single-threaded authentication phase. The result
++    /// pipe is private to the parent and this worker.
++    pub(crate) fn start(
++        terminal: &AuthTerminal,
++        background: bool,
++        authenticate: impl FnOnce() -> AttemptResult,
++    ) -> io::Result<Self> {
++        if std::fs::read_dir("/proc/self/task")?.take(2).count() != 1 {
++            return Err(io::Error::other(
++                "authentication workers require a single-threaded caller",
++            ));
++        }
++        let mut descriptors = [-1; 2];
++        // SAFETY: descriptors holds two writable c_int values.
++        cerr(unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) })?;
++        // SAFETY: successful pipe2 returned two newly owned file descriptors.
++        let (result, report) = unsafe {
++            (
++                File::from_raw_fd(descriptors[0]),
++                File::from_raw_fd(descriptors[1]),
++            )
++        };
++        // SAFETY: getpid takes no arguments.
++        let parent = unsafe { libc::getpid() };
++        // SAFETY: sudo is still single-threaded and has not started any PAM transactions.
++        match unsafe { fork()? } {
++            ForkResult::Parent(pid) => Ok(Self { result, pid }),
++            ForkResult::Child => {
++                drop(result);
++                // SAFETY: these calls operate on this child and take no pointers.
++                let parent_is_alive = unsafe {
++                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM, 0, 0, 0) == 0
++                        && libc::getppid() == parent
++                        && (!background || libc::setpgid(0, 0) == 0)
++                };
++                if parent_is_alive && terminal.cancellation.restore().is_ok() {
++                    let _ = (&report).write_all(&[authenticate() as u8]);
++                }
++                // SAFETY: do not run parent cleanup code from this forked child.
++                unsafe { libc::_exit(0) }
++            }
++        }
++    }
++
++    fn result(&mut self) -> io::Result<AttemptResult> {
++        let mut result = [0];
++        match self.result.read_exact(&mut result) {
++            Ok(()) if result[0] == AttemptResult::Matched as u8 => Ok(AttemptResult::Matched),
++            Ok(()) if result[0] == AttemptResult::Exhausted as u8 => Ok(AttemptResult::Exhausted),
++            Ok(()) => Ok(AttemptResult::Failed),
++            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(AttemptResult::Failed),
++            Err(error) => Err(error),
++        }
++    }
++}
++
++impl Drop for AuthWorker {
++    fn drop(&mut self) {
++        // Until it is reaped the child still owns this PID. Give the worker time
++        // to restore terminal settings or to release the readers before escalating.
++        loop {
++            match self.pid.wait(WaitOptions::new().no_hang()) {
++                Err(WaitError::NotReady) => break,
++                Err(WaitError::Io(error)) if error.kind() == io::ErrorKind::Interrupted => continue,
++                _ => return,
++            }
++        }
++        let _ = kill(self.pid, libc::SIGTERM);
++        let deadline = Instant::now() + Duration::from_secs(1);
++        while Instant::now() < deadline {
++            match self.pid.wait(WaitOptions::new().no_hang()) {
++                Err(WaitError::NotReady) => thread::sleep(Duration::from_millis(10)),
++                Err(WaitError::Io(error)) if error.kind() == io::ErrorKind::Interrupted => continue,
++                _ => return,
++            }
++        }
++        let _ = kill(self.pid, libc::SIGKILL);
++        while let Err(WaitError::Io(error)) = self.pid.wait(WaitOptions::new()) {
++            if error.kind() != io::ErrorKind::Interrupted {
++                break;
++            }
++        }
++    }
++}
++
++/// Wait for the first finished worker, leaving individual retry loops in each child.
++pub(crate) fn next_result(
++    workers: &mut [Option<AuthWorker>; 2],
++    terminal: &AuthTerminal,
++) -> io::Result<(usize, AttemptResult)> {
++    loop {
++        let mut fds = [libc::pollfd {
++            fd: -1,
++            events: libc::POLLIN,
++            revents: 0,
++        }; 3];
++        for (fd, worker) in fds.iter_mut().zip(workers.iter()) {
++            if let Some(worker) = worker {
++                fd.fd = worker.result.as_raw_fd();
++            }
++        }
++        fds[2].fd = terminal.cancellation.fd.as_raw_fd();
++        // SAFETY: fds is initialized and contains three pollfd entries.
++        match cerr(unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) }) {
++            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
++            Err(error) => return Err(error),
++            Ok(_) => {}
++        }
++        if fds[2].revents != 0 {
++            let signal = terminal.cancellation.receive()?;
++            workers.fill_with(|| None);
++            terminal.restore(true)?;
++            terminal.cancellation.restore()?;
++            // SAFETY: reset the signal disposition and re-deliver to this process.
++            unsafe {
++                libc::signal(signal, libc::SIG_DFL);
++                libc::raise(signal);
++            }
++            return Err(io::Error::from(io::ErrorKind::Interrupted));
++        }
++        if let Some(index) = fds[..2].iter().position(|fd| fd.revents != 0) {
++            let mut worker = workers[index].take().expect("polled worker");
++            return worker.result().map(|result| (index, result));
++        }
++    }
++}

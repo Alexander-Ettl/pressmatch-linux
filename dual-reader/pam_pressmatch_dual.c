@@ -580,7 +580,6 @@ on_timeout (gpointer user_data)
   return G_SOURCE_REMOVE;
 }
 
-#ifdef DUAL_CLI_TEST
 static gboolean
 on_unix_cancel (gpointer user_data)
 {
@@ -590,7 +589,6 @@ on_unix_cancel (gpointer user_data)
     g_main_loop_quit (ctx->loop);
   return G_SOURCE_CONTINUE;
 }
-#endif
 
 static int
 run_dual_verify_once (const char *username, const char *service, int max_tries, int timeout_sec,
@@ -754,14 +752,22 @@ run_dual_verify_once (const char *username, const char *service, int max_tries, 
 #endif
         }
       /* Only arm timeout when timeout_sec > 0. Attach ALL sources to our private mctx! */
+      GSource *sig_term = NULL;
+      GSource *sig_int = NULL;
 #ifdef DUAL_CLI_TEST
-      GSource *sig_term = g_unix_signal_source_new (SIGTERM);
-      g_source_set_callback (sig_term, on_unix_cancel, &ctx, NULL);
-      g_source_attach (sig_term, mctx);
-      GSource *sig_int = g_unix_signal_source_new (SIGINT);
-      g_source_set_callback (sig_int, on_unix_cancel, &ctx, NULL);
-      g_source_attach (sig_int, mctx);
+      const gboolean cancellable_worker = TRUE;
+#else
+      const gboolean cancellable_worker = g_strcmp0 (service, "sudo-pressmatch-fingerprint") == 0;
 #endif
+      if (cancellable_worker)
+        {
+          sig_term = g_unix_signal_source_new (SIGTERM);
+          g_source_set_callback (sig_term, on_unix_cancel, &ctx, NULL);
+          g_source_attach (sig_term, mctx);
+          sig_int = g_unix_signal_source_new (SIGINT);
+          g_source_set_callback (sig_int, on_unix_cancel, &ctx, NULL);
+          g_source_attach (sig_int, mctx);
+        }
       if (timeout_sec > 0)
         {
           ctx.timeout_src = g_timeout_source_new_seconds ((guint) timeout_sec);
@@ -775,12 +781,13 @@ run_dual_verify_once (const char *username, const char *service, int max_tries, 
           g_source_unref (ctx.timeout_src);
           ctx.timeout_src = NULL;
         }
-#ifdef DUAL_CLI_TEST
-      g_source_destroy (sig_term);
-      g_source_unref (sig_term);
-      g_source_destroy (sig_int);
-      g_source_unref (sig_int);
-#endif
+      if (cancellable_worker)
+        {
+          g_source_destroy (sig_term);
+          g_source_unref (sig_term);
+          g_source_destroy (sig_int);
+          g_source_unref (sig_int);
+        }
     }
   else
     {
@@ -928,7 +935,7 @@ pam_sm_authenticate (pam_handle_t *pamh, int flags, int argc, const char **argv)
     {
       timeout_sec = -1;
       max_tries = 5;
-      persistent_rearm = TRUE;
+      persistent_rearm = g_strcmp0 (service, "sudo-pressmatch-fingerprint") != 0;
     }
 
   for (int i = 0; i < argc; i++)

@@ -1,0 +1,2 @@
+#%PAM-1.0
+auth required pam_pressmatch_dual.so max-tries=5 timeout=-1
