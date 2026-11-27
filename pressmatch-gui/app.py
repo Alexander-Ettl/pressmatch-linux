@@ -55,6 +55,7 @@ from i18n import (
     sensor_phrase,
     tr,
 )
+from success_chime import SuccessChime
 from widgets import GRID_COLS, GRID_ROWS, SensorHintIcon, TouchIdFingerprintWidget
 
 GUI_DIR = Path(__file__).resolve().parent
@@ -391,6 +392,7 @@ class PressMatchWindow(QMainWindow):
 
     def __init__(self, demo_mode: bool = False, lang: str = "en", theme: str = "light"):
         super().__init__()
+        self._success_chime = SuccessChime(self)
         self.demo_mode = demo_mode
         self.lang = lang
         self.theme = theme
@@ -1496,6 +1498,7 @@ class PressMatchWindow(QMainWindow):
         matched = bool(res.get("matched"))
         dev: SensorDevice = res["device"]
         if matched:
+            self._success_chime.play()
             self.fp_verify.set_verify_state("match")
             self._set_try_chip_state(dev.sensor_id, "match", prefix="✓  ")
             self.lbl_done_title.setText(self._t("unlocked_title"))

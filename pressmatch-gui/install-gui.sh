@@ -33,34 +33,49 @@ EOF
 
 update-desktop-database "$APP_DIR" 2>/dev/null || true
 
-# Install & enable floating Touch ID desktop HUD service
+# Build native C11 Wayland OLED HUD if toolchain & headers are available; fall back to Python HUD
+HUD_EXEC="/usr/bin/python3 \"$SCRIPT_DIR/pressmatch_hud.py\""
+HUD_ENV="Environment=QT_WAYLAND_SHELL_INTEGRATION=layer-shell"
+HUD_BACKEND="Python (PyQt6 fallback)"
+if [[ -f "$SCRIPT_DIR/hud-c/Makefile" ]] && command -v make >/dev/null 2>&1 && command -v wayland-scanner >/dev/null 2>&1; then
+  if make -C "$SCRIPT_DIR/hud-c" -j; then
+    HUD_EXEC="\"$SCRIPT_DIR/hud-c/pressmatch-hud\""
+    HUD_ENV=""
+    HUD_BACKEND="Native C11 Wayland (pressmatch-hud)"
+  else
+    echo "WARN: Native C11 HUD build failed; falling back to pressmatch_hud.py" >&2
+  fi
+fi
+
+# Install & enable floating OLED G3 corner HUD service
 USER_UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 mkdir -p "$USER_UNIT_DIR"
 cat >"$USER_UNIT_DIR/pressmatch-hud.service" <<EOF
 [Unit]
-Description=PressMatch Touch ID-Style Floating Fingerprint HUD
+Description=PressMatch OLED G3 Fingerprint HUD
 PartOf=graphical-session.target
 After=graphical-session.target
 
 [Service]
 Type=simple
-Environment=QT_WAYLAND_SHELL_INTEGRATION=layer-shell
-ExecStart=/usr/bin/python3 "$SCRIPT_DIR/pressmatch_hud.py"
+${HUD_ENV}
+ExecStart=${HUD_EXEC}
 Restart=on-failure
 RestartSec=2
 
 [Install]
 WantedBy=graphical-session.target
 EOF
-systemctl --user daemon-reload 2>/dev/null || true
-systemctl --user enable --now pressmatch-hud.service 2>/dev/null || true
+systemctl --user daemon-reload
+systemctl --user enable --now pressmatch-hud.service
+systemctl --user restart pressmatch-hud.service
 
-# Install Plasma 6 lockscreen Touch ID pill override (user-local, zero root)
+# Install Plasma 6 lockscreen OLED G3 corner override (user-local, zero root)
 if [[ -x "$SCRIPT_DIR/lockscreen/install-lockscreen-hud.sh" ]] && [[ -d /usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen ]]; then
-  bash "$SCRIPT_DIR/lockscreen/install-lockscreen-hud.sh" >/dev/null 2>&1 || true
+  bash "$SCRIPT_DIR/lockscreen/install-lockscreen-hud.sh"
 fi
 
-echo "Installed PressMatch Setup desktop entry & Touch ID HUD:"
+echo "Installed PressMatch Setup desktop entry & OLED G3 HUD ($HUD_BACKEND):"
 echo "  $APP_DIR/pressmatch-setup.desktop"
 echo "  $ICON_DIR/pressmatch-setup.svg"
 echo "  $USER_UNIT_DIR/pressmatch-hud.service"

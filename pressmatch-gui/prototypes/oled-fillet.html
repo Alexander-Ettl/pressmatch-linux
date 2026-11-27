@@ -1,0 +1,969 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PressMatch · OLED G3 Corner Sensor Prototype</title>
+<style>
+  :root {
+    --ink: #f5f5f7;
+    --muted: rgba(235, 235, 245, 0.62);
+    --blue: #0a84ff;
+    --cyan: #64d2ff;
+    --green: #30d158;
+    --amber: #ff9f0a;
+    --red: #ff5e4d;
+    --ease-mech: cubic-bezier(0.2, 0.9, 0.25, 1);
+    /* Adaptive OLED contrast rim strength (0..1), driven by corner luminance */
+    --rim-strength: 1;
+    --rim-color: #dce6f7;
+    --bloom-color: #8ab4f8;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden; background: #000;
+    font-family: "SF Pro Display", "SF Pro Text", "Inter", "Noto Sans", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased; color: var(--ink);
+    user-select: none;
+  }
+
+  /* --- Display layer: fills the full viewport edge-to-edge so the G3 fillet
+   * cuts cleanly out of the screen rectangle with zero edge seam. --- */
+  #screen {
+    position: fixed; inset: 0; overflow: hidden;
+    transition: background 480ms ease, color 480ms ease;
+  }
+  #screen.wall-blank { background: #000000; }
+  #screen.wall-oled  { background: #000000; }
+  #screen.wall-dark  { background:
+      radial-gradient(1250px 850px at 18% 14%, #2c437a 0%, transparent 60%),
+      radial-gradient(950px 750px at 84% 82%, #432268 0%, transparent 62%),
+      linear-gradient(160deg, #0c152e, #120b24); }
+  #screen.wall-light { background:
+      radial-gradient(1100px 800px at 15% 10%, #ffffff 0%, transparent 60%),
+      radial-gradient(900px 700px at 90% 85%, #cfe0ff 0%, transparent 62%),
+      linear-gradient(160deg, #edf1f8, #dce3f2); color: #1c1c1e; }
+
+  #screenContent {
+    position: absolute; inset: 0; transform-origin: 50% 50%;
+    will-change: transform;
+  }
+  .lock {
+    position: absolute; left: 0; right: 0; top: 15vh; text-align: center;
+    transition: opacity 480ms ease, transform 680ms var(--ease-mech);
+  }
+  .lock .time {
+    font-size: clamp(68px, 12.5vw, 148px); font-weight: 600;
+    letter-spacing: -0.025em; line-height: 1; font-variant-numeric: tabular-nums;
+  }
+  .lock .date { margin-top: 10px; font-size: clamp(16px, 2vw, 23px); opacity: 0.78; font-weight: 450; }
+  #screen.wall-blank .lock { opacity: 0; pointer-events: none; }
+  #screen.wall-oled  .lock { opacity: 0.56; }
+  #screen.unlocked   .lock { opacity: 0; transform: translateY(-28px) scale(0.97); }
+
+  .welcome {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    font-size: clamp(22px, 3vw, 32px); font-weight: 500; opacity: 0;
+    letter-spacing: -0.01em;
+    transition: opacity 600ms ease 240ms;
+  }
+  #screen.unlocked .welcome { opacity: 0.92; }
+
+  /* --- OLED Pure-Black Hardware Fillet + Adaptive Dynamic-Island Shine --- */
+  #hw { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+  #hwShape { fill: #000000; }
+
+  /* Drop shadow used only on brighter backdrops */
+  #hwShadow { fill: rgba(15, 23, 42, 0.16); filter: blur(18px); opacity: 0; transition: opacity 400ms ease; }
+  #screen.wall-blank ~ #hw #hwShadow,
+  #screen.wall-oled  ~ #hw #hwShadow { opacity: 0 !important; }
+
+  /* Outer-only OLED ambient bloom (drawn BEHIND #hwShape so the interior stays
+   * 100% pure #000000 black while a soft luminous sheen hugs the outside edge) */
+  #hwBloomWide {
+    fill: none;
+    stroke: url(#bloomGrad);
+    stroke-width: 14;
+    stroke-linecap: round;
+    filter: url(#softBloom);
+    opacity: calc(var(--rim-strength) * 0.42);
+    transition: opacity 420ms ease;
+  }
+  #hwBloomTight {
+    fill: none;
+    stroke: url(#bloomGrad);
+    stroke-width: 4.5;
+    stroke-linecap: round;
+    filter: url(#tightBloom);
+    opacity: calc(var(--rim-strength) * 0.52);
+    transition: opacity 420ms ease;
+  }
+
+  /* Precision specular keyline along the exact G3 contour (fades to 0 at both
+   * screen-edge tangents via #rimGrad so there is never an abrupt cap) */
+  #hwRim {
+    fill: none;
+    stroke: url(#rimGrad);
+    stroke-width: 1.25;
+    stroke-linecap: round;
+    opacity: calc(var(--rim-strength) * 0.88);
+    transition: opacity 420ms ease;
+  }
+
+  /* Specular traveling glint (smooth soft-feathered highlight gliding along
+   * the G3 bevel on extend / match — zero hard dash endpoints) */
+  #hwGlint {
+    fill: none;
+    stroke: url(#glintGrad);
+    stroke-width: 2.2;
+    stroke-linecap: round;
+    filter: url(#glintSoft);
+    opacity: 0;
+  }
+
+  /* Subtle living breath on the OLED rim while waiting on pure black */
+  #hw[data-state="ready"] #hwBloomWide { animation: rimBreathe 3.0s ease-in-out infinite; }
+  @keyframes rimBreathe {
+    0%, 100% { opacity: calc(var(--rim-strength) * 0.30); }
+    50%      { opacity: calc(var(--rim-strength) * 0.52); }
+  }
+
+  /* State-reactive bloom boost (Dynamic Island / Apple Intelligence edge light) */
+  #hw[data-state="scanning"] #hwBloomWide,
+  #hw[data-state="scanmove"] #hwBloomWide {
+    opacity: calc(max(var(--rim-strength), 0.35) * 0.72);
+    animation: rimPulse 1.8s ease-in-out infinite;
+  }
+  #hw[data-state="scanning"] #hwRim,
+  #hw[data-state="scanmove"] #hwRim {
+    opacity: calc(max(var(--rim-strength), 0.35) * 0.98);
+  }
+  #hw[data-state="match"] #hwBloomWide {
+    opacity: calc(max(var(--rim-strength), 0.45) * 0.88);
+  }
+  #hw[data-state="match"] #hwRim {
+    opacity: calc(max(var(--rim-strength), 0.45) * 1.0);
+  }
+  #hw[data-state="light"] #hwBloomWide,
+  #hw[data-state="hard"] #hwBloomWide {
+    opacity: calc(max(var(--rim-strength), 0.30) * 0.65);
+    animation: rimPulse 1.25s ease-in-out infinite;
+  }
+  #hw[data-state="nomatch"] #hwBloomWide {
+    opacity: calc(max(var(--rim-strength), 0.30) * 0.72);
+  }
+  #hw[data-state="declined"] #hwBloomWide {
+    opacity: calc(var(--rim-strength) * 0.28);
+  }
+  @keyframes rimPulse {
+    0%, 100% { stroke-width: 12; }
+    50%      { stroke-width: 18; }
+  }
+
+  #sensorHit { pointer-events: all; cursor: pointer; fill: transparent; }
+
+  #fpGroup { transition: opacity 340ms ease; }
+  #labelText { transition: opacity 340ms ease; }
+  #sensorMotion, #fp, #fpFill, #ghost, #check, #rings, #arrows, #orbitTrack {
+    transform-box: fill-box; transform-origin: center;
+  }
+
+  /* Fingerprint ridges (vertical Touch ID oval whorl) */
+  .ridge { fill: none; stroke-width: 2.0; stroke-linecap: round; }
+  #fp .ridge { stroke: rgba(255, 255, 255, 0.88); transition: stroke 260ms ease, opacity 260ms ease; }
+  #fpFill .ridge { stroke: var(--blue); opacity: 0; }
+
+  /* Ready: calm breathing */
+  #hw[data-state="ready"] #fp { animation: breathe 3.0s ease-in-out infinite; }
+  @keyframes breathe { 0%, 100% { opacity: 0.72; } 50% { opacity: 1; } }
+
+  /* Scanning (frame 1): ridges sweep blue from centre outward */
+  #hw[data-state="scanning"] #fp .ridge { stroke: rgba(255, 255, 255, 0.28); }
+  #hw[data-state="scanning"] #fpFill .ridge { opacity: 1; animation: fill 620ms ease-out forwards; }
+  @keyframes fill { from { stroke-dashoffset: var(--len); } to { stroke-dashoffset: 0; } }
+
+  /* Scan & Move (5-frame capture): gentle micro-orbit showing the user to
+   * roll/shift slightly across the sensor so frames 2-5 capture fresh ridges */
+  #orbitTrack { opacity: 0; transition: opacity 280ms ease; }
+  #orbitTrack circle { fill: none; stroke: rgba(100, 210, 255, 0.26); stroke-width: 1.4; stroke-dasharray: 3 4; }
+  #hw[data-state="scanmove"] #orbitTrack { opacity: 1; }
+  #hw[data-state="scanmove"] #fp .ridge { stroke: rgba(100, 210, 255, 0.92); }
+  #hw[data-state="scanmove"] #fpFill .ridge { opacity: 0.85; stroke: var(--blue); stroke-dashoffset: 0; }
+  #hw[data-state="scanmove"] #sensorMotion { animation: microOrbit 2.2s ease-in-out infinite; }
+  @keyframes microOrbit {
+    0%   { transform: translate(0px, 0px); }
+    20%  { transform: translate(5.5px, -3.5px); }
+    45%  { transform: translate(-4.5px, -5px); }
+    70%  { transform: translate(-5.5px, 4px); }
+    90%  { transform: translate(4px, 4.5px); }
+    100% { transform: translate(0px, 0px); }
+  }
+
+  /* 5-frame capture pips along the upper inner arc */
+  #framePips { opacity: 0; transition: opacity 240ms ease; }
+  #hw[data-state="scanmove"] #framePips { opacity: 1; }
+  #framePips circle {
+    fill: rgba(255, 255, 255, 0.18);
+    transition: fill 220ms ease, r 220ms ease;
+  }
+  #framePips circle.captured { fill: var(--cyan); }
+  #framePips circle.active { fill: #ffffff; }
+
+  /* Match: ridges flash emerald and hand off cleanly to checkmark */
+  #hw[data-state="match"] #fp .ridge,
+  #hw[data-state="match"] #fpFill .ridge {
+    stroke: var(--green); opacity: 0;
+    transition: opacity 240ms ease 180ms, stroke 140ms ease;
+  }
+  #check {
+    fill: none; stroke: var(--green); stroke-width: 3.4;
+    stroke-linecap: round; stroke-linejoin: round; opacity: 0;
+  }
+  #hw[data-state="match"] #check { opacity: 1; animation: drawCheck 380ms ease-out 220ms both; }
+  @keyframes drawCheck { from { stroke-dashoffset: 60; } to { stroke-dashoffset: 0; } }
+
+  /* No match: damped horizontal shake + coral */
+  #hw[data-state="nomatch"] #sensorMotion { animation: shake 500ms cubic-bezier(.36,.07,.19,.97); }
+  #hw[data-state="nomatch"] #fp .ridge { stroke: var(--red); }
+  @keyframes shake {
+    10%, 90% { transform: translateX(-1.5px); }
+    20%, 80% { transform: translateX(3.5px); }
+    30%, 50%, 70% { transform: translateX(-5.5px); }
+    40%, 60% { transform: translateX(5.5px); }
+  }
+
+  /* Declined: calm dimmed coral */
+  #hw[data-state="declined"] #fp .ridge { stroke: var(--red); opacity: 0.45; }
+
+  /* Pressure guidance */
+  #rings circle { fill: none; stroke-width: 1.5; opacity: 0; transform-box: fill-box; transform-origin: center; }
+  #hw[data-state="light"] #rings circle { stroke: var(--amber); animation: firmer 1.2s ease-in infinite; }
+  #hw[data-state="light"] #rings circle:nth-child(2) { animation-delay: 0.4s; }
+  #hw[data-state="light"] #rings circle:nth-child(3) { animation-delay: 0.8s; }
+  @keyframes firmer {
+    0%   { transform: scale(1.42); opacity: 0; }
+    32%  { opacity: 0.85; }
+    100% { transform: scale(0.82); opacity: 0; }
+  }
+  #hw[data-state="light"] #sensorMotion { animation: pressIn 1.2s ease-in-out infinite; }
+  @keyframes pressIn { 0%, 100% { transform: scale(1.0); } 55% { transform: scale(0.88); } }
+
+  #hw[data-state="hard"] #rings circle { stroke: var(--amber); animation: lighter 1.3s ease-out infinite; }
+  #hw[data-state="hard"] #rings circle:nth-child(2) { animation-delay: 0.43s; }
+  #hw[data-state="hard"] #rings circle:nth-child(3) { animation-delay: 0.86s; }
+  @keyframes lighter {
+    0%   { transform: scale(0.84); opacity: 0.88; }
+    100% { transform: scale(1.42); opacity: 0; }
+  }
+  #hw[data-state="hard"] #sensorMotion { animation: release 1.3s ease-in-out infinite; }
+  @keyframes release { 0%, 100% { transform: scale(0.90); } 50% { transform: scale(1.06); } }
+  #hw[data-state="light"] #fp .ridge, #hw[data-state="hard"] #fp .ridge { stroke: var(--amber); }
+
+  /* Directional guidance */
+  #ghost { opacity: 0; }
+  #ghost .ridge { stroke: rgba(255, 255, 255, 0.72); }
+  #hw[data-state="left"] #fp .ridge,
+  #hw[data-state="right"] #fp .ridge,
+  #hw[data-state="up"] #fp .ridge,
+  #hw[data-state="down"] #fp .ridge { stroke: rgba(255, 255, 255, 0.34); }
+  #hw[data-state="left"] #ghost,
+  #hw[data-state="right"] #ghost,
+  #hw[data-state="up"] #ghost,
+  #hw[data-state="down"] #ghost { animation: glide 1.3s var(--ease-mech) infinite; }
+  @keyframes glide {
+    0%   { opacity: 0; transform: translate(0, 0); }
+    22%  { opacity: 0.92; }
+    85%  { opacity: 0.85; transform: translate(var(--gx), var(--gy)); }
+    100% { opacity: 0; transform: translate(var(--gx), var(--gy)); }
+  }
+  #arrows path {
+    fill: none; stroke: rgba(255, 255, 255, 0.92); stroke-width: 2.1;
+    stroke-linecap: round; stroke-linejoin: round; opacity: 0;
+  }
+  #hw[data-state="left"] #arrows path,
+  #hw[data-state="right"] #arrows path,
+  #hw[data-state="up"] #arrows path,
+  #hw[data-state="down"] #arrows path { animation: chevron 1.3s ease-in-out infinite; }
+  #arrows path:nth-child(2) { animation-delay: 0.16s !important; }
+  @keyframes chevron { 0%, 100% { opacity: 0.12; } 45% { opacity: 1; } }
+
+  /* Curved status text hugging the inside of the G3 fillet */
+  #label {
+    font-size: 13px; font-weight: 600; letter-spacing: 0.015em;
+    fill: var(--muted); transition: fill 260ms ease;
+  }
+  #hw[data-state="match"] #label { fill: var(--green); }
+  #hw[data-state="nomatch"] #label, #hw[data-state="declined"] #label { fill: var(--red); }
+  #hw[data-state="light"] #label, #hw[data-state="hard"] #label { fill: var(--amber); }
+  #hw[data-state="scanning"] #label { fill: #7cc0ff; }
+  #hw[data-state="scanmove"] #label { fill: var(--cyan); }
+  #hw[data-state="left"] #label, #hw[data-state="right"] #label,
+  #hw[data-state="up"] #label, #hw[data-state="down"] #label { fill: rgba(255, 255, 255, 0.9); }
+
+  /* --- Prototype controls: bottom-left glass dock ------------------------ */
+  #dock {
+    position: fixed; left: 20px; bottom: 20px;
+    display: flex; flex-wrap: wrap; gap: 6px; max-width: 590px;
+    padding: 10px; border-radius: 16px;
+    background: rgba(22, 22, 26, 0.78);
+    backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+    border: 1px solid rgba(255, 255, 255, 0.11);
+    font-size: 12px; z-index: 10; transition: opacity 280ms ease;
+  }
+  #dock.hidden { opacity: 0; pointer-events: none; }
+  #dock button {
+    font: inherit; color: #f5f5f7; background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.10); border-radius: 9px;
+    padding: 6px 10px; cursor: pointer; transition: background 150ms ease, border-color 150ms ease;
+  }
+  #dock button:hover { background: rgba(255, 255, 255, 0.17); }
+  #dock button.primary {
+    background: rgba(10, 132, 255, 0.24); border-color: rgba(100, 210, 255, 0.42); color: #d8f1ff;
+  }
+  #dock button.primary:hover { background: rgba(10, 132, 255, 0.36); }
+  #dock button.active {
+    background: rgba(255, 255, 255, 0.22); border-color: rgba(255, 255, 255, 0.42); color: #fff;
+  }
+  #dock .group-label {
+    color: rgba(235, 235, 245, 0.48); align-self: center; font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.06em; padding: 0 4px 0 2px;
+  }
+  #dock .sep { width: 100%; height: 0; }
+  #dock .hint { color: rgba(235, 235, 245, 0.54); padding: 4px 4px 0; width: 100%; line-height: 1.4; }
+  kbd { font: inherit; padding: 1px 5px; border-radius: 4px; background: rgba(255, 255, 255, 0.13); }
+</style>
+</head>
+<body>
+
+<div id="screen" class="wall-blank">
+  <div id="screenContent">
+    <div class="lock">
+      <div class="time" id="clock">13:45</div>
+      <div class="date" id="date">Friday, 27 November</div>
+    </div>
+    <div class="welcome">Welcome back</div>
+  </div>
+</div>
+
+<svg id="hw" data-state="hidden" aria-label="Fingerprint sensor">
+  <defs>
+    <clipPath id="hwClip"><path id="hwClipPath"/></clipPath>
+    <path id="textCurve"/>
+
+    <!-- Edge-fading gradients along the G3 curve chord (W-L, H) -> (W, H-L)
+         so both the specular keyline and outer bloom dissolve smoothly to 0%
+         at the screen edges with zero abrupt start/end points. -->
+    <linearGradient id="rimGrad" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#dce6f7" stop-opacity="0"/>
+      <stop offset="16%"  stop-color="#dce6f7" stop-opacity="0.34"/>
+      <stop offset="50%"  stop-color="#ffffff" stop-opacity="0.92"/>
+      <stop offset="84%"  stop-color="#dce6f7" stop-opacity="0.34"/>
+      <stop offset="100%" stop-color="#dce6f7" stop-opacity="0"/>
+    </linearGradient>
+
+    <linearGradient id="bloomGrad" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#9cc4ff" stop-opacity="0"/>
+      <stop offset="20%"  stop-color="#9cc4ff" stop-opacity="0.38"/>
+      <stop offset="50%"  stop-color="#d6e7ff" stop-opacity="0.88"/>
+      <stop offset="80%"  stop-color="#9cc4ff" stop-opacity="0.38"/>
+      <stop offset="100%" stop-color="#9cc4ff" stop-opacity="0"/>
+    </linearGradient>
+
+    <linearGradient id="glintGrad" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="0%"   stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="0%"   stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+
+    <filter id="softBloom" x="-25%" y="-25%" width="150%" height="150%">
+      <feGaussianBlur stdDeviation="11"/>
+    </filter>
+    <filter id="tightBloom" x="-25%" y="-25%" width="150%" height="150%">
+      <feGaussianBlur stdDeviation="2.6"/>
+    </filter>
+    <filter id="glintSoft" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="0.9"/>
+    </filter>
+  </defs>
+
+  <!-- Shadows & outer OLED halo live BEHIND #hwShape so #hwShape keeps its
+       interior 100% pure #000000 black with razor-clean outer luminescence -->
+  <path id="hwShadow"/>
+  <path id="hwBloomWide"/>
+  <path id="hwBloomTight"/>
+
+  <!-- Pure #000000 OLED hardware cutout -->
+  <path id="hwShape"/>
+
+  <!-- Specular Apple-style Dynamic Island keyline + mechanical glint -->
+  <path id="hwRim"/>
+  <path id="hwGlint"/>
+
+  <g clip-path="url(#hwClip)">
+    <g id="fpGroup" opacity="0">
+      <g id="sensor">
+        <g id="rings"></g>
+        <g id="orbitTrack"><circle r="27"/></g>
+        <g id="sensorMotion">
+          <g id="ghost"></g>
+          <g id="fp"></g>
+          <g id="fpFill"></g>
+        </g>
+        <g id="arrows"></g>
+      </g>
+      <g id="framePips"></g>
+      <path id="check"/>
+    </g>
+  </g>
+  <text id="labelText" opacity="0">
+    <textPath id="label" href="#textCurve" startOffset="50%" text-anchor="middle">Touch to unlock</textPath>
+  </text>
+  <circle id="sensorHit" r="0"/>
+</svg>
+
+<div id="dock">
+  <button data-act="show">Extend</button>
+  <button data-act="hide">Retract</button>
+  <button data-act="scanmove" class="primary">Scan &amp; move (5×)</button>
+  <span class="sep"></span>
+  <button data-act="light">Too light</button>
+  <button data-act="hard">Too hard</button>
+  <button data-act="left">Move left</button>
+  <button data-act="right">Move right</button>
+  <button data-act="up">Move up</button>
+  <button data-act="nomatch">No match</button>
+  <button data-act="declined">Declined</button>
+  <span class="sep"></span>
+  <span class="group-label">Screen</span>
+  <button data-wall="wall-blank" class="active">Blank OLED</button>
+  <button data-wall="wall-oled">OLED Lock</button>
+  <button data-wall="wall-dark">Dark</button>
+  <button data-wall="wall-light">Light</button>
+  <button data-act="shine" id="shineBtn">Shine: Auto (100%)</button>
+  <button data-act="dock">Hide</button>
+  <div class="hint">Switch <b>Screen</b> to see the OLED edge shine adapt automatically to background brightness · Hold the fingerprint (or <kbd>Space</kbd>) to unlock · <kbd>H</kbd> toggles controls</div>
+</div>
+
+<audio id="chime" src="../sounds/fingerprint-success.wav" preload="auto"></audio>
+
+<script>
+"use strict";
+const NS = "http://www.w3.org/2000/svg";
+const $ = (id) => document.getElementById(id);
+const hw = $("hw"), screen = $("screen"), screenContent = $("screenContent");
+
+/* ---------- Exact CAD G3 Fillet (degree-7 Bezier) -------------------------
+ * P0..P3 lie on y = H and P4..P7 lie on x = W: κ(0) = κ(1) = 0 and
+ * dκ/ds(0) = dκ/ds(1) = 0 identically. */
+const K = 0.50;
+const BINOM7 = [1, 7, 21, 35, 35, 21, 7, 1];
+
+function controlPoints(W, H, L) {
+  const d = (i) => L - i * (L - K * L) / 3;
+  const pts = [];
+  for (let i = 0; i < 4; i++) pts.push([W - d(i), H]);
+  for (let i = 3; i >= 0; i--) pts.push([W, H - d(i)]);
+  return pts;
+}
+
+function bezier(pts, t) {
+  let x = 0, y = 0;
+  for (let i = 0; i < 8; i++) {
+    const b = BINOM7[i] * Math.pow(1 - t, 7 - i) * Math.pow(t, i);
+    x += b * pts[i][0]; y += b * pts[i][1];
+  }
+  return [x, y];
+}
+
+function sampleCurve(W, H, L, n = 200) {
+  const pts = controlPoints(W, H, L);
+  const out = [];
+  for (let i = 0; i <= n; i++) out.push(bezier(pts, i / n));
+  return out;
+}
+
+function curveLength(pts) {
+  let sum = 0;
+  for (let i = 1; i < pts.length; i++) {
+    sum += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+  }
+  return sum;
+}
+
+const fmt = (p) => p[0].toFixed(2) + " " + p[1].toFixed(2);
+
+/* ---------- Adaptive OLED Rim Contrast Engine ---------------------------
+ * Computes how much specular rim + outer sheen is needed based on the
+ * corner's background luminance (0 = pitch black OLED -> 1.0 shine;
+ * ~0.06 = dark wallpaper -> 0.40 subtle catch; >0.45 = light -> 0.0).
+ * Also updates the rim & bloom tint smoothly per interaction state. */
+const WALL_LUMINANCE = {
+  "wall-blank": 0.00,
+  "wall-oled":  0.00,
+  "wall-dark":  0.07,
+  "wall-light": 0.86,
+};
+
+const RIM_PALETTE = {
+  ready:    { rim: "#e2ecff", peak: "#ffffff", bloom: "#8fbaff", bloomPeak: "#d8e9ff" },
+  scanning: { rim: "#5ac8fa", peak: "#d8f4ff", bloom: "#0a84ff", bloomPeak: "#64d2ff" },
+  scanmove: { rim: "#64d2ff", peak: "#e6f9ff", bloom: "#0a84ff", bloomPeak: "#64d2ff" },
+  match:    { rim: "#4cd964", peak: "#d9ffe2", bloom: "#30d158", bloomPeak: "#7dff9b" },
+  light:    { rim: "#ffb340", peak: "#ffe8bf", bloom: "#ff9f0a", bloomPeak: "#ffd080" },
+  hard:     { rim: "#ffb340", peak: "#ffe8bf", bloom: "#ff9f0a", bloomPeak: "#ffd080" },
+  left:     { rim: "#e6f0ff", peak: "#ffffff", bloom: "#8fbaff", bloomPeak: "#e6f0ff" },
+  right:    { rim: "#e6f0ff", peak: "#ffffff", bloom: "#8fbaff", bloomPeak: "#e6f0ff" },
+  up:       { rim: "#e6f0ff", peak: "#ffffff", bloom: "#8fbaff", bloomPeak: "#e6f0ff" },
+  down:     { rim: "#e6f0ff", peak: "#ffffff", bloom: "#8fbaff", bloomPeak: "#e6f0ff" },
+  nomatch:  { rim: "#ff6961", peak: "#ffd4d1", bloom: "#ff453a", bloomPeak: "#ff8c85" },
+  declined: { rim: "#ff5e4d", peak: "#ff9b91", bloom: "#ff453a", bloomPeak: "#ff6961" },
+};
+
+let currentWall = "wall-blank";
+let shineMode = "auto"; // "auto" | "on" | "off"
+
+function computeAdaptiveStrength(lum) {
+  // Smooth falloff: full contrast aid at lum=0, subtle catch around lum=0.07,
+  // completely gone once the backdrop itself has plenty of contrast (>0.22).
+  const t = Math.max(0, Math.min(1, 1 - lum / 0.22));
+  return +(t * t * (3 - 2 * t)).toFixed(2); // smoothstep
+}
+
+function updateRimContrast() {
+  const lum = WALL_LUMINANCE[currentWall] ?? 0;
+  let strength;
+  if (shineMode === "on") strength = 1.0;
+  else if (shineMode === "off") strength = 0.0;
+  else strength = computeAdaptiveStrength(lum);
+
+  document.documentElement.style.setProperty("--rim-strength", strength);
+  const pct = Math.round(strength * 100);
+  const modeLabel = shineMode === "auto" ? `Auto (${pct}%)` : (shineMode === "on" ? "Always On" : "Off");
+  $("shineBtn").textContent = "Shine: " + modeLabel;
+}
+
+function setRimPalette(state) {
+  const p = RIM_PALETTE[state] || RIM_PALETTE.ready;
+  const rStops = $("rimGrad").children;
+  rStops[0].setAttribute("stop-color", p.rim);
+  rStops[1].setAttribute("stop-color", p.rim);
+  rStops[2].setAttribute("stop-color", p.peak);
+  rStops[3].setAttribute("stop-color", p.rim);
+  rStops[4].setAttribute("stop-color", p.rim);
+
+  const bStops = $("bloomGrad").children;
+  bStops[0].setAttribute("stop-color", p.bloom);
+  bStops[1].setAttribute("stop-color", p.bloom);
+  bStops[2].setAttribute("stop-color", p.bloomPeak);
+  bStops[3].setAttribute("stop-color", p.bloom);
+  bStops[4].setAttribute("stop-color", p.bloom);
+}
+
+let glintAnim = null;
+function triggerGlint() {
+  cancelAnimationFrame(glintAnim);
+  const strength = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--rim-strength")) || 0;
+  if (strength < 0.05) { $("hwGlint").style.opacity = "0"; return; }
+  const stops = $("glintGrad").children;
+  const start = performance.now();
+  const dur = 920;
+  const tickGlint = (now) => {
+    const t = Math.min(1, (now - start) / dur);
+    // Ease-in-out specular sweep from 12% to 88% along the G3 arc
+    const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+    const center = 10 + e * 80; // % along chord
+    const halfW = 16;
+    const env = Math.sin(t * Math.PI); // 0 at start & end
+    stops[0].setAttribute("offset", Math.max(0, center - halfW).toFixed(1) + "%");
+    stops[1].setAttribute("offset", center.toFixed(1) + "%");
+    stops[1].setAttribute("stop-opacity", (0.85 * env).toFixed(3));
+    stops[2].setAttribute("offset", Math.min(100, center + halfW).toFixed(1) + "%");
+    $("hwGlint").style.opacity = (strength * env).toFixed(3);
+    if (t < 1) glintAnim = requestAnimationFrame(tickGlint);
+    else $("hwGlint").style.opacity = "0";
+  };
+  glintAnim = requestAnimationFrame(tickGlint);
+}
+
+/* ---------- Touch ID-style vertical oval fingerprint glyph -------------- */
+function fingerprintPaths() {
+  const arcs = [
+    [20.0, 22.8,  28, 138,  0.0],
+    [20.0, 22.8, 200, 148,  0.0],
+    [15.0, 17.6,  12, 172,  0.6],
+    [15.0, 17.6, 212, 128,  0.6],
+    [10.0, 12.6,  -5, 198,  1.2],
+    [10.0, 12.6, 232, 108,  1.2],
+    [ 5.0,  7.2, -10, 215,  1.8],
+  ];
+  const out = [];
+  for (const [rx, ry, aStartDeg, sweepDeg, cyOff] of arcs) {
+    const a0 = -aStartDeg * Math.PI / 180;
+    const a1 = -(aStartDeg + sweepDeg) * Math.PI / 180;
+    const x0 = rx * Math.cos(a0), y0 = cyOff + ry * Math.sin(a0);
+    const x1 = rx * Math.cos(a1), y1 = cyOff + ry * Math.sin(a1);
+    const large = Math.abs(sweepDeg) > 180 ? 1 : 0;
+    const d = `M${x0.toFixed(2)} ${y0.toFixed(2)} A${rx} ${ry} 0 ${large} 0 ${x1.toFixed(2)} ${y1.toFixed(2)}`;
+    const avgR = (rx + ry) * 0.5;
+    out.push({ d, len: avgR * (sweepDeg * Math.PI / 180) });
+  }
+  out.push({ d: "M0 2.0 L0 11.6", len: 9.6 });
+  return out;
+}
+
+function buildGlyph(group, cls) {
+  group.innerHTML = "";
+  for (const { d, len } of fingerprintPaths()) {
+    const path = document.createElementNS(NS, "path");
+    path.setAttribute("d", d);
+    path.setAttribute("class", "ridge");
+    path.style.setProperty("--len", len.toFixed(1));
+    path.style.strokeDasharray = len.toFixed(1);
+    if (cls === "fill") path.style.strokeDashoffset = len.toFixed(1);
+    group.appendChild(path);
+  }
+}
+buildGlyph($("fp"));
+buildGlyph($("fpFill"), "fill");
+buildGlyph($("ghost"));
+
+for (let i = 0; i < 3; i++) {
+  const c = document.createElementNS(NS, "circle");
+  c.setAttribute("r", "25");
+  $("rings").appendChild(c);
+}
+
+for (let i = 0; i < 5; i++) {
+  const c = document.createElementNS(NS, "circle");
+  c.setAttribute("r", "3");
+  $("framePips").appendChild(c);
+}
+
+/* ---------- Responsive layout ------------------------------------------- */
+let L = 0;
+let Lmax = 0;
+const view = { W: 0, H: 0 };
+
+function layout() {
+  const W = window.innerWidth, H = window.innerHeight;
+  view.W = W; view.H = H;
+  hw.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  Lmax = Math.max(300, Math.min(440, Math.min(W, H) * 0.43));
+  render();
+}
+
+function render() {
+  const { W, H } = view;
+  if (L < 0.5) {
+    for (const id of ["hwShape", "hwRim", "hwGlint", "hwBloomWide", "hwBloomTight", "hwClipPath", "hwShadow"]) {
+      $(id).setAttribute("d", "");
+    }
+    $("hwShadow").style.opacity = "0";
+    $("sensorHit").setAttribute("r", "0");
+    screenContent.style.transform = "";
+    return;
+  }
+  const curve = sampleCurve(W, H, L);
+  const curvePath = "M" + curve.map(fmt).join(" L");
+  const shape = curvePath + ` L${W + 6} ${H - L} L${W + 6} ${H + 6} L${W - L} ${H + 6} Z`;
+  const cLen = curveLength(curve);
+
+  // Align the edge-fading gradients strictly to the G3 junction chord
+  for (const gid of ["rimGrad", "bloomGrad", "glintGrad"]) {
+    const g = $(gid);
+    g.setAttribute("x1", (W - L).toFixed(1));
+    g.setAttribute("y1", H.toFixed(1));
+    g.setAttribute("x2", W.toFixed(1));
+    g.setAttribute("y2", (H - L).toFixed(1));
+  }
+
+  $("hwShape").setAttribute("d", shape);
+  $("hwClipPath").setAttribute("d", shape);
+  $("hwShadow").setAttribute("d", shape);
+  $("hwShadow").style.opacity = Math.min(1, L / Lmax).toFixed(2);
+
+  for (const id of ["hwRim", "hwBloomWide", "hwBloomTight", "hwGlint"]) {
+    $(id).setAttribute("d", curvePath);
+  }
+
+  // Largest inscribed circle inside the G3 corner pocket
+  const mid = bezier(controlPoints(W, H, L), 0.5);
+  const D = Math.hypot(W - mid[0], H - mid[1]);
+  const r = D / (1 + Math.SQRT2);
+
+  const cx = W - r * 0.86;
+  const cy = H - r * 0.86;
+  const scale = (r * 0.43) / 22.8;
+  $("sensor").setAttribute("transform", `translate(${cx.toFixed(1)} ${cy.toFixed(1)}) scale(${scale.toFixed(3)})`);
+
+  const cs = scale * 1.08;
+  $("check").setAttribute(
+    "d",
+    `M${(cx - 11 * cs).toFixed(1)} ${(cy + 1 * cs).toFixed(1)} L${(cx - 3 * cs).toFixed(1)} ${(cy + 9 * cs).toFixed(1)} L${(cx + 13 * cs).toFixed(1)} ${(cy - 9 * cs).toFixed(1)}`
+  );
+  $("check").style.strokeDasharray = (60 * cs).toFixed(1);
+
+  $("sensorHit").setAttribute("cx", cx.toFixed(1));
+  $("sensorHit").setAttribute("cy", cy.toFixed(1));
+  $("sensorHit").setAttribute("r", (r * 0.88).toFixed(1));
+
+  // 5 frame-capture pips in a concentric arc between glyph and label
+  const pipR = r * 0.62;
+  const pips = $("framePips").children;
+  for (let i = 0; i < 5; i++) {
+    const ang = (-135 + (i - 2) * 15) * Math.PI / 180;
+    pips[i].setAttribute("cx", (cx + pipR * Math.cos(ang)).toFixed(1));
+    pips[i].setAttribute("cy", (cy + pipR * Math.sin(ang)).toFixed(1));
+    pips[i].setAttribute("r", Math.max(2.4, r * 0.042).toFixed(1));
+  }
+
+  // Curved label baseline offset inward from the G3 curve
+  const off = Math.max(19, r * 0.30);
+  const inner = curve.map((p, i) => {
+    const a = curve[Math.max(0, i - 1)], b = curve[Math.min(curve.length - 1, i + 1)];
+    const tx = b[0] - a[0], ty = b[1] - a[1];
+    const n = Math.hypot(tx, ty) || 1;
+    let nx = -ty / n, ny = tx / n;
+    if ((W - p[0]) * nx + (H - p[1]) * ny < 0) { nx = -nx; ny = -ny; }
+    return [p[0] + nx * off, p[1] + ny * off];
+  });
+  $("textCurve").setAttribute("d", "M" + inner.map(fmt).join(" L"));
+  $("label").style.fontSize = Math.max(12, Math.min(14.5, r * 0.205)).toFixed(1) + "px";
+
+  // Mechanical push on inner display content
+  const frac = L / Lmax;
+  const push = frac * 10;
+  screenContent.style.transform = `translate(${(-push).toFixed(2)}px, ${(-push * 0.7).toFixed(2)}px) scale(${(1 - frac * 0.012).toFixed(5)})`;
+}
+
+/* ---------- Mechanical drive -------------------------------------------- */
+let anim = null;
+function driveTo(target, onDone) {
+  cancelAnimationFrame(anim);
+  const start = performance.now(), from = L;
+  const extending = target > from;
+  const step = (now) => {
+    const t = Math.min(1, (now - start) / (extending ? 760 : 440));
+    let e;
+    if (extending) {
+      const w = 11.2, z = 0.64;
+      const wd = w * Math.sqrt(1 - z * z);
+      e = 1 - Math.exp(-z * w * t) * (Math.cos(wd * t) + (z / Math.sqrt(1 - z * z)) * Math.sin(wd * t));
+      if (t === 1) e = 1;
+    } else {
+      e = t * t * t;
+    }
+    L = from + (target - from) * e;
+    render();
+    if (t < 1) anim = requestAnimationFrame(step);
+    else if (onDone) onDone();
+  };
+  anim = requestAnimationFrame(step);
+}
+
+/* ---------- State machine ----------------------------------------------- */
+const LABELS = {
+  ready: "Touch to unlock",
+  scanning: "Reading…",
+  scanmove: "Move finger slightly",
+  match: "Unlocked",
+  nomatch: "Not recognised · try again",
+  declined: "Use your password",
+  light: "Press a little firmer",
+  hard: "Press more gently",
+  left: "Move finger left",
+  right: "Move finger right",
+  up: "Move toward fingertip",
+  down: "Move slightly down",
+};
+const GLIDE = { left: [-13, 0], right: [13, 0], up: [0, -13], down: [0, 13] };
+let revertTimer = null;
+let multiScanTimers = [];
+
+function clearMultiScan() {
+  for (const t of multiScanTimers) clearTimeout(t);
+  multiScanTimers = [];
+  for (const p of $("framePips").children) p.classList.remove("captured", "active");
+}
+
+function setState(state, { revertAfter = 0 } = {}) {
+  clearTimeout(revertTimer);
+  clearMultiScan();
+  hw.dataset.state = state;
+  setRimPalette(state);
+  if (LABELS[state]) $("label").textContent = LABELS[state];
+  const g = GLIDE[state];
+  if (g) {
+    $("ghost").style.setProperty("--gx", g[0] + "px");
+    $("ghost").style.setProperty("--gy", g[1] + "px");
+    drawArrows(state);
+  }
+  if (state === "scanning") {
+    for (const p of $("fpFill").children) {
+      p.style.animation = "none"; void p.getBBox(); p.style.animation = "";
+    }
+  }
+  if (state === "match") triggerGlint();
+  if (revertAfter) revertTimer = setTimeout(() => setState("ready"), revertAfter);
+}
+
+function drawArrows(dir) {
+  const a = $("arrows"); a.innerHTML = "";
+  const rot = { right: 0, down: 90, left: 180, up: 270 }[dir];
+  for (const dx of [25, 31.5]) {
+    const p = document.createElementNS(NS, "path");
+    p.setAttribute("d", `M${dx} -5 L${dx + 5} 0 L${dx} 5`);
+    p.setAttribute("transform", `rotate(${rot})`);
+    a.appendChild(p);
+  }
+}
+
+function runScanAndMove() {
+  if (L < Lmax * 0.9) {
+    show();
+    setTimeout(runScanAndMove, 820);
+    return;
+  }
+  setState("scanmove");
+  triggerGlint();
+  const pips = $("framePips").children;
+  pips[0].classList.add("captured");
+  pips[1].classList.add("active");
+  $("label").textContent = "Move finger slightly · 1/5";
+
+  const steps = [
+    [650,  2, "Move finger slightly · 2/5"],
+    [1300, 3, "Keep moving gently · 3/5"],
+    [1950, 4, "Almost there · 4/5"],
+    [2550, 5, "Captured · 5/5"],
+  ];
+  for (const [delay, n, text] of steps) {
+    multiScanTimers.push(setTimeout(() => {
+      for (let i = 0; i < 5; i++) {
+        pips[i].classList.toggle("captured", i < n);
+        pips[i].classList.toggle("active", i === n);
+      }
+      $("label").textContent = text;
+    }, delay));
+  }
+  multiScanTimers.push(setTimeout(() => {
+    setState("match");
+    chime();
+    setTimeout(() => retract(() => screen.classList.add("unlocked")), 950);
+  }, 2950));
+}
+
+function show() {
+  screen.classList.remove("unlocked");
+  setState("ready");
+  driveTo(Lmax, () => {
+    $("fpGroup").setAttribute("opacity", "1");
+    $("labelText").setAttribute("opacity", "1");
+    triggerGlint();
+  });
+}
+
+function retract(after) {
+  clearMultiScan();
+  $("fpGroup").setAttribute("opacity", "0");
+  $("labelText").setAttribute("opacity", "0");
+  setTimeout(() => driveTo(0, after), 300);
+}
+
+/* ---------- Success chime ----------------------------------------------- */
+let actx = null;
+function chime() {
+  const a = $("chime");
+  a.currentTime = 0;
+  a.play().catch(() => {
+    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    const t0 = actx.currentTime;
+    [[1318.5, 0], [1975.5, 0.09]].forEach(([f, dt]) => {
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type = "sine"; o.frequency.value = f;
+      g.gain.setValueAtTime(0, t0 + dt);
+      g.gain.linearRampToValueAtTime(0.16, t0 + dt + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + 0.9);
+      o.connect(g).connect(actx.destination);
+      o.start(t0 + dt); o.stop(t0 + dt + 1);
+    });
+  });
+}
+
+/* ---------- Hold interaction -------------------------------------------- */
+let holdTimer = null;
+function fingerDown() {
+  if (L < Lmax * 0.9 || ["match", "declined"].includes(hw.dataset.state)) return;
+  setState("scanning");
+  holdTimer = setTimeout(() => {
+    holdTimer = null;
+    setState("match");
+    chime();
+    setTimeout(() => retract(() => screen.classList.add("unlocked")), 900);
+  }, 650);
+}
+function fingerUp() {
+  if (holdTimer) {
+    clearTimeout(holdTimer); holdTimer = null;
+    $("label").textContent = "Hold until it reacts";
+    hw.dataset.state = "ready";
+    setRimPalette("ready");
+    revertTimer = setTimeout(() => setState("ready"), 1400);
+  }
+}
+$("sensorHit").addEventListener("pointerdown", (e) => { e.preventDefault(); fingerDown(); });
+window.addEventListener("pointerup", fingerUp);
+window.addEventListener("keydown", (e) => {
+  if (e.code === "Space" && !e.repeat) { e.preventDefault(); fingerDown(); }
+  if (e.key === "h" || e.key === "H") $("dock").classList.toggle("hidden");
+});
+window.addEventListener("keyup", (e) => { if (e.code === "Space") fingerUp(); });
+
+/* ---------- Prototype controls ------------------------------------------ */
+function setWall(wall) {
+  screen.classList.remove(currentWall);
+  currentWall = wall;
+  screen.classList.add(currentWall);
+  for (const b of document.querySelectorAll("[data-wall]")) {
+    b.classList.toggle("active", b.dataset.wall === wall);
+  }
+  updateRimContrast();
+}
+
+const shineModes = ["auto", "on", "off"];
+$("dock").addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  if (btn.dataset.wall) return setWall(btn.dataset.wall);
+  const act = btn.dataset.act;
+  if (!act) return;
+  if (act === "show") return show();
+  if (act === "hide") return retract();
+  if (act === "scanmove") return runScanAndMove();
+  if (act === "dock") return $("dock").classList.add("hidden");
+  if (act === "shine") {
+    shineMode = shineModes[(shineModes.indexOf(shineMode) + 1) % shineModes.length];
+    updateRimContrast();
+    if (shineMode !== "off") triggerGlint();
+    return;
+  }
+  if (L < Lmax * 0.9) show();
+  if (act === "declined") return setState("declined");
+  if (act === "nomatch") return setState("nomatch", { revertAfter: 1600 });
+  setState(act, { revertAfter: 3800 });
+});
+
+/* ---------- Clock + startup --------------------------------------------- */
+function tick() {
+  const d = new Date();
+  $("clock").textContent = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  $("date").textContent = d.toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" });
+}
+tick(); setInterval(tick, 15000);
+window.addEventListener("resize", layout);
+updateRimContrast();
+layout();
+setTimeout(show, 650);
+</script>
+</body>
+</html>

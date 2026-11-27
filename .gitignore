@@ -110,3 +110,14 @@ id_dsa*
 *.ppk
 *credentials*
 *secret*
+
+# --- competitive benchmark: derived images, raw score logs, compiled scorer ---
+paper-benchmark/competitive/work/
+paper-benchmark/competitive/native/pm_scorer
+__pycache__/
+.pytest_cache/
+
+# --- Local agent scratch & temporary cancel trigger ---
+_work/
+dual-reader/cancel
+
