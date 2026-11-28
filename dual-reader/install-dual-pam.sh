@@ -49,15 +49,17 @@ if [[ -x "$SCRIPT_DIR/pressmatch-elan-sso" ]]; then
   install -d -m 755 /usr/lib/systemd/system-sleep
   cat > /usr/lib/systemd/system-sleep/pressmatch-elan-sso <<'SLEEP_EOF'
 #!/usr/bin/env bash
-# Arm ELAN EMSE1000 Software SSO before sleep (s2idle/suspend) so pressing the
-# power button to wake caches the fingerprint; disarm SW SSO on hibernate so
-# hardware power-on SSO takes over cleanly on cold boot.
 case "$1/$2" in
   pre/suspend|pre/suspend-then-hibernate)
+    systemctl stop fprintd.service >/dev/null 2>&1 || true
     /usr/local/libexec/pressmatch-elan-sso --swsso-on >/dev/null 2>&1 || true
     ;;
   pre/hibernate)
+    systemctl stop fprintd.service >/dev/null 2>&1 || true
     /usr/local/libexec/pressmatch-elan-sso --swsso-off >/dev/null 2>&1 || true
+    ;;
+  post/suspend|post/hibernate|post/hybrid-sleep|post/suspend-then-hibernate)
+    systemctl try-restart fprintd.service >/dev/null 2>&1 || true
     ;;
 esac
 SLEEP_EOF
@@ -97,7 +99,13 @@ if [[ -f /etc/pam.d/gdm-fingerprint ]]; then
 fi
 
 if [[ -f /usr/lib/pam.d/kde-fingerprint ]]; then
-  sed 's/pam_fprintd\.so.*/pam_pressmatch_dual.so max-tries=5 timeout=-1/' /usr/lib/pam.d/kde-fingerprint > /etc/pam.d/kde-fingerprint
+  # pam_kwallet5 is dropped from the fingerprint auth stack: with no password it
+  # prompts for one itself, and the lock screen's fingerprint worker never answers
+  # prompts, so the unlock stalls after a match whenever the session was started
+  # without a password (fingerprint login), i.e. PAM_KWALLET5_LOGIN is unset.
+  sed -e 's/pam_fprintd\.so.*/pam_pressmatch_dual.so max-tries=5 timeout=-1/' \
+      -e '/^auth[[:space:]].*pam_kwallet5\.so/d' \
+      /usr/lib/pam.d/kde-fingerprint > /etc/pam.d/kde-fingerprint
   chmod 644 /etc/pam.d/kde-fingerprint
 fi
 

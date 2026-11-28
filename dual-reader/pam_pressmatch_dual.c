@@ -33,8 +33,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <syslog.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Standard Linux-PAM ABI declarations (matches libpam.so.0 on x86_64 Ubuntu/Kubuntu) */
@@ -48,6 +50,8 @@ typedef struct pam_handle pam_handle_t;
 #define PAM_CONV              5
 #define PAM_TEXT_INFO         4
 #define PAM_ERROR_MSG         3
+#define PAM_PROMPT_ECHO_OFF   1
+#define PAM_AUTHTOK           6
 
 struct pam_message {
   int msg_style;
@@ -65,6 +69,7 @@ struct pam_conv {
 
 extern int pam_get_user (pam_handle_t *pamh, const char **user, const char *prompt);
 extern int pam_get_item (const pam_handle_t *pamh, int item_type, const void **item);
+extern int pam_set_item (pam_handle_t *pamh, int item_type, const void *item);
 
 static void
 send_pam_msg (pam_handle_t *pamh, int style, const char *text)
@@ -86,6 +91,30 @@ send_pam_msg (pam_handle_t *pamh, int style, const char *text)
       free (resp[0].resp);
       free (resp);
     }
+}
+
+/* Ask the application for the password once. Returns a malloc'd string
+ * (possibly empty) or NULL when the conversation failed. */
+static char *
+ask_pam_password (pam_handle_t *pamh)
+{
+  const void *item = NULL;
+  if (pam_get_item (pamh, PAM_CONV, &item) != PAM_SUCCESS || !item)
+    return NULL;
+  const struct pam_conv *conv = (const struct pam_conv *) item;
+  if (!conv->conv)
+    return NULL;
+  struct pam_message msg = { .msg_style = PAM_PROMPT_ECHO_OFF, .msg = "Password: " };
+  const struct pam_message *msgs[1] = { &msg };
+  struct pam_response *resp = NULL;
+  if (conv->conv (1, msgs, &resp, conv->appdata_ptr) != PAM_SUCCESS || !resp)
+    {
+      free (resp);
+      return NULL;
+    }
+  char *pw = resp[0].resp ? resp[0].resp : strdup ("");
+  free (resp);
+  return pw;
 }
 #endif
 
@@ -125,6 +154,7 @@ is_internal_builtin_reader (const char *dev_name)
 }
 
 typedef struct _DualCtx DualCtx;
+static void pm_log (const char *fmt, ...) G_GNUC_PRINTF (1, 2);
 
 typedef struct {
   DualCtx    *ctx;
@@ -158,10 +188,96 @@ struct _DualCtx {
   gint64           t_start_us;
   gdouble          unlock_ms;
   GSource         *timeout_src;
+  /* login-screen mode (option `greeter`): status goes to the greeter theme as
+   * machine-readable "pressmatch:" info messages, and the theme can cancel a
+   * pending attempt by creating cancel_file */
+  gboolean         greeter;
+  const char      *cancel_file;
+  gboolean         armed_any;
 #ifndef DUAL_CLI_TEST
   pam_handle_t    *pamh;
 #endif
 };
+
+typedef struct {
+  gboolean    enabled;
+  const char *cancel_file;
+  gboolean    armed_any;   /* out: at least one reader was armed */
+} GreeterOpts;
+
+/* status for the login-screen theme; ignored by other front ends */
+static void G_GNUC_PRINTF (2, 3)
+greeter_token (const DualCtx *ctx, const char *fmt, ...)
+{
+  if (!ctx || !ctx->greeter)
+    return;
+  va_list ap;
+  va_start (ap, fmt);
+  g_autofree char *body = g_strdup_vprintf (fmt, ap);
+  va_end (ap);
+#ifdef DUAL_CLI_TEST
+  printf ("  <greeter> pressmatch:%s\n", body);
+  fflush (stdout);
+#else
+  g_autofree char *msg = g_strconcat ("pressmatch:", body, NULL);
+  send_pam_msg (ctx->pamh, PAM_TEXT_INFO, msg);
+#endif
+}
+
+/* Why the last ELAN press failed, as written by the elanpress driver to
+ * /run/pressmatch/elan-hint ("hint=<code> ..."). Only trusted if written in
+ * the last few seconds, i.e. for the failure being reported right now. */
+typedef struct {
+  const char *code;
+  const char *text;
+} PressHint;
+
+static const PressHint press_hints[] = {
+  { "too_light",  "Press firmer, cover the sensor" },
+  { "too_hard",   "Press more gently" },
+  { "off_center", "Center your finger on the sensor" },
+  { "moving",     "Hold still until it reacts" },
+  { "dry",        "Wipe your finger and the sensor" },
+  { "wrong_area", "Place it like during setup" },
+};
+
+static const PressHint *
+read_press_hint (const char *dev_name)
+{
+  struct stat st;
+  g_autofree char *contents = NULL;
+
+  if (!dev_name || !(strstr (dev_name, "ElanTech") || strstr (dev_name, "ELAN")))
+    return NULL;
+  if (stat ("/run/pressmatch/elan-hint", &st) != 0 || time (NULL) - st.st_mtime > 3)
+    return NULL;
+  if (!g_file_get_contents ("/run/pressmatch/elan-hint", &contents, NULL, NULL))
+    return NULL;
+  for (guint i = 0; i < G_N_ELEMENTS (press_hints); i++)
+    {
+      g_autofree char *key = g_strdup_printf ("hint=%s ", press_hints[i].code);
+      if (g_str_has_prefix (contents, key))
+        return &press_hints[i];
+    }
+  return NULL;
+}
+
+/* the greeter asks for a pending attempt to stop (e.g. a password was entered) */
+static gboolean
+on_cancel_poll (gpointer user_data)
+{
+  DualCtx *ctx = (DualCtx *) user_data;
+  struct stat st;
+  if (ctx->cancel_file && lstat (ctx->cancel_file, &st) == 0)
+    {
+      pm_log ("cancel requested via %s", ctx->cancel_file);
+      ctx->result = 4;
+      if (g_main_loop_is_running (ctx->loop))
+        g_main_loop_quit (ctx->loop);
+      return G_SOURCE_REMOVE;
+    }
+  return G_SOURCE_CONTINUE;
+}
 
 static const char *
 short_reader_label (const char *dev_name)
@@ -270,8 +386,10 @@ on_dev_props_changed (GDBusProxy *proxy,
       g_string_append_c (payload, '}');
       emit_hud_json (ctx, payload->str);
       g_string_free (payload, TRUE);
+      if (ctx->greeter)
+        greeter_token (ctx, "scanning:%s", label);
 #ifndef DUAL_CLI_TEST
-      if (!ctx->quiet)
+      else if (!ctx->quiet)
         {
           g_autofree char *msg = g_strdup_printf ("Scanning fingerprint on %s…", label);
           send_pam_msg (ctx->pamh, PAM_TEXT_INFO, msg);
@@ -352,6 +470,7 @@ on_verify_status (GDBusProxy  *proxy,
       ctx->winner_name = g_strdup (ad->name);
       ctx->winner_path = g_strdup (ad->path);
       ctx->unlock_ms = (g_get_monotonic_time () - ctx->t_start_us) / 1000.0;
+      greeter_token (ctx, "match:%s", short_reader_label (ad->name));
       {
         GString *payload = g_string_new ("{\"state\":\"match\",\"device\":");
         json_append_escaped (payload, short_reader_label (ad->name));
@@ -366,19 +485,72 @@ on_verify_status (GDBusProxy  *proxy,
       return;
     }
 
-  if (g_strcmp0 (status, "verify-no-match") == 0 ||
-      g_strcmp0 (status, "verify-retry-scan") == 0 ||
+  /* Retry results mean the reader got nothing it could score (too light or
+   * partial a touch, too little ridge contrast). They are not a match attempt,
+   * so they do not use up a try: the user just gets told what to fix. */
+  const PressHint *hint = NULL;
+  if (g_strcmp0 (status, "verify-no-match") == 0 || g_str_has_prefix (status, "verify-retry") ||
       g_strcmp0 (status, "verify-swipe-too-short") == 0 ||
       g_strcmp0 (status, "verify-finger-not-centered") == 0 ||
       g_strcmp0 (status, "verify-remove-and-retry") == 0)
     {
-      ctx->tries_used++;
+      hint = read_press_hint (ad->name);
+      if (hint)
+        pm_log ("press hint for '%s': %s", ad->name, hint->code);
+    }
+
+  gboolean is_retry = g_strcmp0 (status, "verify-retry-scan") == 0 ||
+                      g_strcmp0 (status, "verify-swipe-too-short") == 0 ||
+                      g_strcmp0 (status, "verify-finger-not-centered") == 0 ||
+                      g_strcmp0 (status, "verify-remove-and-retry") == 0;
+  if (is_retry)
+    {
+      const char *label = short_reader_label (ad->name);
+      GString *payload = g_string_new ("{\"state\":\"partial\",\"device\":");
+      json_append_escaped (payload, label);
+      g_string_append (payload, ",\"status\":");
+      json_append_escaped (payload, status);
+      if (hint)
+        {
+          g_string_append (payload, ",\"hint\":");
+          json_append_escaped (payload, hint->text);
+        }
+      g_string_append (payload, ",\"service\":");
+      json_append_escaped (payload, ctx->service ? ctx->service : "pam");
+      g_string_append_c (payload, '}');
+      emit_hud_json (ctx, payload->str);
+      g_string_free (payload, TRUE);
+      greeter_token (ctx, "partial:%s:%s", label, hint ? hint->code : "too_light");
+#ifdef DUAL_CLI_TEST
+      printf ("  [%s] %s (not counted)\n", ad->name, status);
+      fflush (stdout);
+#else
+      if (!ctx->greeter && !ctx->quiet)
+        {
+          g_autofree char *msg = hint
+            ? g_strdup_printf ("Touch not read — %s", hint->text)
+            : g_strdup_printf ("Cover the whole %s sensor with your finger and hold", label);
+          send_pam_msg (ctx->pamh, PAM_TEXT_INFO, msg);
+        }
+#endif
+    }
+
+  if (g_strcmp0 (status, "verify-no-match") == 0 || is_retry)
+    {
+      if (!is_retry)
+        ctx->tries_used++;
+      if (!is_retry)
       {
         GString *payload = g_string_new ("{\"state\":\"retry\",\"device\":");
         json_append_escaped (payload, short_reader_label (ad->name));
         g_string_append_printf (payload, ",\"tries\":%d,\"max_tries\":%d,\"status\":",
                                 ctx->tries_used, ctx->max_tries);
         json_append_escaped (payload, status ? status : "verify-no-match");
+        if (hint)
+          {
+            g_string_append (payload, ",\"hint\":");
+            json_append_escaped (payload, hint->text);
+          }
         g_string_append (payload, ",\"service\":");
         json_append_escaped (payload, ctx->service ? ctx->service : "pam");
         g_string_append_c (payload, '}');
@@ -389,11 +561,24 @@ on_verify_status (GDBusProxy  *proxy,
       printf ("  [%s] %s (attempt %d/%d)\n", ad->name, status, ctx->tries_used, ctx->max_tries);
       fflush (stdout);
 #else
-      if (!ctx->quiet && ctx->tries_used < ctx->max_tries)
-        send_pam_msg (ctx->pamh, PAM_TEXT_INFO, "Failed to match fingerprint — try again on either reader");
+      if (!is_retry && !ctx->greeter && !ctx->quiet && ctx->tries_used < ctx->max_tries)
+        {
+          g_autofree char *msg = hint
+            ? g_strdup_printf ("Failed to match fingerprint — %s", hint->text)
+            : g_strdup ("Failed to match fingerprint — try again on either reader");
+          send_pam_msg (ctx->pamh, PAM_TEXT_INFO, msg);
+        }
 #endif
+      if (!is_retry)
+        greeter_token (ctx, "retry:%d:%d:%s:%s", ctx->tries_used, ctx->max_tries,
+                       short_reader_label (ad->name), hint ? hint->code : "");
       if (ctx->tries_used >= ctx->max_tries)
         {
+#ifndef DUAL_CLI_TEST
+          if (!ctx->greeter && !ctx->quiet)
+            send_pam_msg (ctx->pamh, PAM_TEXT_INFO,
+                          "Fingerprint declined after too many attempts — use your password");
+#endif
           ctx->result = 1;
           if (g_main_loop_is_running (ctx->loop))
             g_main_loop_quit (ctx->loop);
@@ -569,6 +754,21 @@ on_manager_signal (GDBusProxy  *proxy,
     }
 }
 
+static void
+on_manager_name_owner (GObject *obj, GParamSpec *pspec, gpointer user_data)
+{
+  (void) pspec;
+  DualCtx *ctx = (DualCtx *) user_data;
+  g_autofree char *owner = g_dbus_proxy_get_name_owner (G_DBUS_PROXY (obj));
+
+  if (!owner && g_main_loop_is_running (ctx->loop))
+    {
+      pm_log ("fprintd vanished from D-Bus; exiting verify loop to re-arm");
+      ctx->result = 3;
+      g_main_loop_quit (ctx->loop);
+    }
+}
+
 static gboolean
 on_timeout (gpointer user_data)
 {
@@ -594,6 +794,7 @@ static int
 run_dual_verify_once (const char *username, const char *service, int max_tries, int timeout_sec,
                       gboolean respect_lid, gboolean builtin_only, gboolean quiet,
                       gboolean send_initial_prompt, gboolean allow_rearm_on_empty,
+                      GreeterOpts *gopt,
 #ifndef DUAL_CLI_TEST
                       pam_handle_t *pamh,
 #endif
@@ -661,6 +862,8 @@ run_dual_verify_once (const char *username, const char *service, int max_tries, 
   ctx.max_tries = max_tries > 0 ? max_tries : 3;
   ctx.result = 2;
   ctx.t_start_us = g_get_monotonic_time ();
+  ctx.greeter = gopt && gopt->enabled;
+  ctx.cancel_file = ctx.greeter ? gopt->cancel_file : NULL;
 #ifndef DUAL_CLI_TEST
   ctx.pamh = pamh;
 #endif
@@ -709,14 +912,32 @@ run_dual_verify_once (const char *username, const char *service, int max_tries, 
         }
     }
 
-  /* Listen for hotplug / USB re-enumeration while locked (e.g. if ELAN finishes
-   * re-enumerating 1 second after locking, arm it automatically!). */
   gulong mgr_sig_id = g_signal_connect (mgr, "g-signal", G_CALLBACK (on_manager_signal), &ctx);
+  gulong mgr_owner_id = g_signal_connect (mgr, "notify::g-name-owner",
+                                          G_CALLBACK (on_manager_name_owner), &ctx);
 
   if (armed > 0)
     {
       emit_hud_armed (&ctx);
-      if (send_initial_prompt && !quiet)
+      ctx.armed_any = TRUE;
+      if (gopt)
+        gopt->armed_any = TRUE;
+      if (ctx.greeter)
+        {
+          GString *labels = g_string_new (NULL);
+          for (guint i = 0; i < ctx.devs->len; i++)
+            {
+              ActiveDev *ad = g_ptr_array_index (ctx.devs, i);
+              if (!ad->verifying)
+                continue;
+              if (labels->len)
+                g_string_append_c (labels, ',');
+              g_string_append (labels, short_reader_label (ad->name));
+            }
+          greeter_token (&ctx, "armed:%s", labels->str);
+          g_string_free (labels, TRUE);
+        }
+      else if (send_initial_prompt && !quiet)
         {
           g_autofree char *prompt = NULL;
           if (armed > 1)
@@ -774,7 +995,19 @@ run_dual_verify_once (const char *username, const char *service, int max_tries, 
           g_source_set_callback (ctx.timeout_src, on_timeout, &ctx, NULL);
           g_source_attach (ctx.timeout_src, mctx);
         }
+      GSource *cancel_src = NULL;
+      if (ctx.cancel_file)
+        {
+          cancel_src = g_timeout_source_new (100);
+          g_source_set_callback (cancel_src, on_cancel_poll, &ctx, NULL);
+          g_source_attach (cancel_src, mctx);
+        }
       g_main_loop_run (ctx.loop);
+      if (cancel_src)
+        {
+          g_source_destroy (cancel_src);
+          g_source_unref (cancel_src);
+        }
       if (ctx.timeout_src)
         {
           g_source_destroy (ctx.timeout_src);
@@ -806,6 +1039,8 @@ run_dual_verify_once (const char *username, const char *service, int max_tries, 
 
   if (mgr_sig_id)
     g_signal_handler_disconnect (mgr, mgr_sig_id);
+  if (mgr_owner_id)
+    g_signal_handler_disconnect (mgr, mgr_owner_id);
 
   /* Cleanly stop and release ALL devices */
   for (guint i = 0; i < ctx.devs->len; i++)
@@ -855,7 +1090,7 @@ run_dual_verify_once (const char *username, const char *service, int max_tries, 
 static int
 run_dual_verify (const char *username, const char *service, int max_tries, int timeout_sec,
                  gboolean respect_lid, gboolean builtin_only, gboolean quiet,
-                 gboolean persistent_rearm,
+                 gboolean persistent_rearm, GreeterOpts *gopt,
 #ifndef DUAL_CLI_TEST
                  pam_handle_t *pamh,
 #endif
@@ -866,14 +1101,14 @@ run_dual_verify (const char *username, const char *service, int max_tries, int t
     {
       int rc = run_dual_verify_once (username, service, max_tries, timeout_sec, respect_lid,
                                      builtin_only, quiet, first,
-                                     persistent_rearm && rearm > 0,
+                                     persistent_rearm && rearm > 0, gopt,
 #ifndef DUAL_CLI_TEST
                                      pamh,
 #endif
                                      winner_out, ms_out);
       first = FALSE;
       if (rc == 4)
-        return 2; /* cleanly cancelled by SIGTERM/SIGINT */
+        return gopt && gopt->enabled ? 4 : 2; /* cleanly cancelled (SIGTERM/SIGINT or greeter) */
       /* In dedicated parallel lockscreen mode (persistent_rearm && timeout_sec <= 0),
        * if devices disconnected during suspend/resume or USB reset (rc == 3), wait briefly
        * and re-arm seamlessly. For sequential services (e.g. polkit-1 with timeout=-1),
@@ -895,11 +1130,20 @@ main (int argc, char **argv)
   int timeout = argc > 2 ? atoi (argv[2]) : 20;
   char *winner = NULL;
   double ms = 0.0;
-  int rc = run_dual_verify (user, "cli-test", 3, timeout, TRUE, FALSE, FALSE, FALSE, &winner, &ms);
+  /* optional third argument: greeter cancel file, to exercise login-screen mode */
+  GreeterOpts gopt = { .enabled = argc > 3, .cancel_file = argc > 3 ? argv[3] : NULL };
+  if (gopt.enabled)
+    unlink (gopt.cancel_file);
+  int rc = run_dual_verify (user, "cli-test", 3, timeout, TRUE, FALSE, FALSE, FALSE,
+                            gopt.enabled ? &gopt : NULL, &winner, &ms);
+  if (gopt.enabled)
+    printf ("greeter: armed_any=%d rc=%d\n", gopt.armed_any ? 1 : 0, rc);
   if (rc == 0)
     printf ("UNLOCKED by [%s] in %.0f ms!\n", winner ? winner : "?", ms);
   else if (rc == 1)
     printf ("DENIED (max tries reached)\n");
+  else if (rc == 4)
+    printf ("CANCELLED\n");
   else
     printf ("TIMEOUT / UNAVAILABLE\n");
   g_free (winner);
@@ -920,6 +1164,7 @@ pam_sm_authenticate (pam_handle_t *pamh, int flags, int argc, const char **argv)
   gboolean respect_lid = TRUE;
   gboolean builtin_only = FALSE;
   gboolean quiet = FALSE;
+  GreeterOpts gopt = { .enabled = FALSE, .cancel_file = "/run/pressmatch-greeter/cancel" };
 
   if (pam_get_user (pamh, &user, NULL) != PAM_SUCCESS || !user || !*user)
     return PAM_AUTHINFO_UNAVAIL;
@@ -956,6 +1201,35 @@ pam_sm_authenticate (pam_handle_t *pamh, int flags, int argc, const char **argv)
         builtin_only = TRUE;
       else if (strcmp (argv[i], "quiet") == 0)
         quiet = TRUE;
+      else if (strcmp (argv[i], "greeter") == 0)
+        gopt.enabled = TRUE;
+      else if (strncmp (argv[i], "cancel-file=", 12) == 0)
+        gopt.cancel_file = argv[i] + 12;
+    }
+
+  /* Login-screen mode. SDDM starts PAM only when the form is submitted and
+   * answers every password prompt with what was typed, so the submission
+   * itself picks the method: a typed password goes on to pam_unix untouched,
+   * an empty one means "use the fingerprint". The theme submits an empty
+   * login as soon as the greeter is shown and cancels it via cancel_file
+   * when a password is entered, because SDDM runs one attempt at a time. */
+  if (gopt.enabled)
+    {
+      char *pw = ask_pam_password (pamh);
+      if (!pw)
+        return PAM_IGNORE;
+      if (*pw)
+        {
+          /* tells the theme this submission arrived (SDDM drops logins
+           * silently while its previous helper is still exiting) */
+          send_pam_msg (pamh, PAM_TEXT_INFO, "pressmatch:password");
+          int set_rc = pam_set_item (pamh, PAM_AUTHTOK, pw);
+          memset (pw, 0, strlen (pw));
+          free (pw);
+          return set_rc == PAM_SUCCESS ? PAM_IGNORE : PAM_AUTHINFO_UNAVAIL;
+        }
+      free (pw);
+      unlink (gopt.cancel_file);
     }
   (void) timeout_explicit;
   (void) max_tries_explicit;
@@ -965,7 +1239,8 @@ pam_sm_authenticate (pam_handle_t *pamh, int flags, int argc, const char **argv)
 
   char *winner = NULL;
   double ms = 0.0;
-  int rc = run_dual_verify (user, service, max_tries, timeout_sec, respect_lid, builtin_only, quiet, persistent_rearm, pamh, &winner, &ms);
+  int rc = run_dual_verify (user, service, max_tries, timeout_sec, respect_lid, builtin_only, quiet,
+                            persistent_rearm, gopt.enabled ? &gopt : NULL, pamh, &winner, &ms);
   if (rc == 0)
     {
       syslog (LOG_AUTHPRIV | LOG_INFO, "pam_pressmatch_dual: matched user=%s service=%s on '%s' (%.0f ms)",
@@ -976,6 +1251,20 @@ pam_sm_authenticate (pam_handle_t *pamh, int flags, int argc, const char **argv)
   syslog (LOG_AUTHPRIV | LOG_INFO, "pam_pressmatch_dual: ended user=%s service=%s rc=%d",
           user, service ? service : "?", rc);
   g_free (winner);
+  if (gopt.enabled)
+    {
+      unlink (gopt.cancel_file);
+      /* never PAM_ERROR_MSG here: SDDM turns it into an immediate loginFailed */
+      DualCtx tok = { .greeter = TRUE, .pamh = pamh };
+      if (!gopt.armed_any)
+        {
+          /* no reader or no enrolled finger: behave as if this module were absent */
+          greeter_token (&tok, "unavailable");
+          return PAM_IGNORE;
+        }
+      greeter_token (&tok, "%s", rc == 1 ? "exhausted" : rc == 4 ? "cancelled" : "timeout");
+      return PAM_AUTH_ERR;
+    }
   return (rc == 1) ? PAM_AUTH_ERR : PAM_AUTHINFO_UNAVAIL;
 }
 

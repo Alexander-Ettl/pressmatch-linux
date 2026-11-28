@@ -120,6 +120,9 @@ struct HudApp {
 
     bool     configured;
     bool     closed;
+    bool     wl_error;
+    int      output_count;
+    uint32_t output_names[16];
     uint32_t scale_120;      /* 120 = 1.0x, 180 = 1.5x, 240 = 2.0x */
     int      phys_sz;        /* ceil(HUD_LOGICAL_SZ * scale_120 / 120) */
 
@@ -180,6 +183,8 @@ struct HudApp {
 
 static void request_repaint(HudApp *app);
 static void maybe_commit_frame(HudApp *app, bool immediate);
+static void destroy_layer_surface(HudApp *app);
+static bool create_layer_surface(HudApp *app);
 
 static void on_buffer_release(void *data, struct wl_buffer *wl_buf) {
     ShmBuf *b = data;
@@ -310,7 +315,11 @@ static void on_layer_configure(void *data, struct zwlr_layer_surface_v1 *ls,
 
 static void on_layer_closed(void *data, struct zwlr_layer_surface_v1 *ls) {
     HudApp *app = data;
-    app->closed = true;
+    (void)ls;
+    destroy_layer_surface(app);
+    if (app->output_count > 0) {
+        create_layer_surface(app);
+    }
 }
 
 static const struct zwlr_layer_surface_v1_listener g_layer_listener = {
@@ -350,10 +359,23 @@ static void on_registry_global(void *data, struct wl_registry *reg,
         app->frac_mgr = wl_registry_bind(reg, name, &wp_fractional_scale_manager_v1_interface, 1);
     } else if (strcmp(iface, wp_single_pixel_buffer_manager_v1_interface.name) == 0) {
         app->spb_mgr = wl_registry_bind(reg, name, &wp_single_pixel_buffer_manager_v1_interface, 1);
+    } else if (strcmp(iface, wl_output_interface.name) == 0) {
+        if (app->output_count < 16)
+            app->output_names[app->output_count++] = name;
+        if (app->layer_shell && !app->layer_surface)
+            create_layer_surface(app);
     }
 }
 
 static void on_registry_remove(void *data, struct wl_registry *reg, uint32_t name) {
+    HudApp *app = data;
+    (void)reg;
+    for (int i = 0; i < app->output_count; i++) {
+        if (app->output_names[i] == name) {
+            app->output_names[i] = app->output_names[--app->output_count];
+            break;
+        }
+    }
 }
 
 static const struct wl_registry_listener g_registry_listener = {
@@ -910,6 +932,67 @@ static void step_demo(HudApp *app, double now) {
 
 /* ── Wayland Initialization ──────────────────────────────────────────────── */
 
+static void destroy_layer_surface(HudApp *app) {
+    if (app->frame_cb) {
+        wl_callback_destroy(app->frame_cb);
+        app->frame_cb = NULL;
+    }
+    retire_active_buffers(app);
+    if (app->layer_surface) {
+        zwlr_layer_surface_v1_destroy(app->layer_surface);
+        app->layer_surface = NULL;
+    }
+    if (app->frac_scale) {
+        wp_fractional_scale_v1_destroy(app->frac_scale);
+        app->frac_scale = NULL;
+    }
+    if (app->viewport) {
+        wp_viewport_destroy(app->viewport);
+        app->viewport = NULL;
+    }
+    if (app->surface) {
+        wl_surface_destroy(app->surface);
+        app->surface = NULL;
+    }
+    app->configured = false;
+    app->attached_idle = false;
+}
+
+static bool create_layer_surface(HudApp *app) {
+    if (!app->compositor || !app->layer_shell || app->layer_surface)
+        return app->layer_surface != NULL;
+
+    app->surface = wl_compositor_create_surface(app->compositor);
+    struct wl_region *empty = wl_compositor_create_region(app->compositor);
+    wl_surface_set_input_region(app->surface, empty);
+    wl_region_destroy(empty);
+
+    if (app->viewporter) {
+        app->viewport = wp_viewporter_get_viewport(app->viewporter, app->surface);
+        wp_viewport_set_destination(app->viewport, HUD_LOGICAL_SZ, HUD_LOGICAL_SZ);
+    }
+    if (app->frac_mgr) {
+        app->frac_scale = wp_fractional_scale_manager_v1_get_fractional_scale(
+            app->frac_mgr, app->surface);
+        wp_fractional_scale_v1_add_listener(app->frac_scale, &g_frac_listener, app);
+    }
+
+    app->layer_surface = zwlr_layer_shell_v1_get_layer_surface(
+        app->layer_shell, app->surface, NULL,
+        ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "pressmatch-hud");
+    zwlr_layer_surface_v1_set_size(app->layer_surface, HUD_LOGICAL_SZ, HUD_LOGICAL_SZ);
+    zwlr_layer_surface_v1_set_anchor(app->layer_surface,
+        ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
+    zwlr_layer_surface_v1_set_exclusive_zone(app->layer_surface, -1);
+    zwlr_layer_surface_v1_set_margin(app->layer_surface, 0, 0, 0, 0);
+    zwlr_layer_surface_v1_set_keyboard_interactivity(app->layer_surface,
+        ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE);
+    zwlr_layer_surface_v1_add_listener(app->layer_surface, &g_layer_listener, app);
+
+    wl_surface_commit(app->surface);
+    return true;
+}
+
 static bool init_wayland(HudApp *app) {
     app->display = wl_display_connect(NULL);
     if (!app->display) {
@@ -932,41 +1015,12 @@ static bool init_wayland(HudApp *app) {
     app->scale_120 = 120;
     app->phys_sz   = HUD_LOGICAL_SZ;
 
-    app->surface = wl_compositor_create_surface(app->compositor);
-
-    /* Explicitly empty input region -> 100% click-through forever */
-    struct wl_region *empty = wl_compositor_create_region(app->compositor);
-    wl_surface_set_input_region(app->surface, empty);
-    wl_region_destroy(empty);
-
-    if (app->viewporter) {
-        app->viewport = wp_viewporter_get_viewport(app->viewporter, app->surface);
-        wp_viewport_set_destination(app->viewport, HUD_LOGICAL_SZ, HUD_LOGICAL_SZ);
-    }
-    if (app->frac_mgr) {
-        app->frac_scale = wp_fractional_scale_manager_v1_get_fractional_scale(
-            app->frac_mgr, app->surface);
-        wp_fractional_scale_v1_add_listener(app->frac_scale, &g_frac_listener, app);
-    }
     if (app->spb_mgr) {
         app->idle_spb = wp_single_pixel_buffer_manager_v1_create_u32_rgba_buffer(
             app->spb_mgr, 0, 0, 0, 0);
     }
 
-    app->layer_surface = zwlr_layer_shell_v1_get_layer_surface(
-        app->layer_shell, app->surface, NULL,
-        ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "pressmatch-hud");
-    zwlr_layer_surface_v1_set_size(app->layer_surface, HUD_LOGICAL_SZ, HUD_LOGICAL_SZ);
-    zwlr_layer_surface_v1_set_anchor(app->layer_surface,
-        ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
-    zwlr_layer_surface_v1_set_exclusive_zone(app->layer_surface, -1);
-    zwlr_layer_surface_v1_set_margin(app->layer_surface, 0, 0, 0, 0);
-    zwlr_layer_surface_v1_set_keyboard_interactivity(app->layer_surface,
-        ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE);
-    zwlr_layer_surface_v1_add_listener(app->layer_surface, &g_layer_listener, app);
-
-    /* Initial bufferless commit -> receive configure -> attach idle pixel */
-    wl_surface_commit(app->surface);
+    create_layer_surface(app);
     wl_display_roundtrip(app->display);
     return true;
 }
@@ -1111,6 +1165,7 @@ int main(int argc, char **argv) {
             if (errno == EAGAIN) {
                 need_wl_out = true;
             } else {
+                app.wl_error = true;
                 wl_display_cancel_read(app.display);
                 break;
             }
@@ -1157,11 +1212,15 @@ int main(int argc, char **argv) {
 
         /* 5. Complete or cancel Wayland read */
         if (fds[idx_wl].revents & (POLLERR | POLLHUP)) {
+            app.wl_error = true;
             wl_display_cancel_read(app.display);
             break;
         }
         if (fds[idx_wl].revents & POLLIN) {
-            if (wl_display_read_events(app.display) < 0) break;
+            if (wl_display_read_events(app.display) < 0) {
+                app.wl_error = true;
+                break;
+            }
             wl_display_dispatch_pending(app.display);
         } else {
             wl_display_cancel_read(app.display);
@@ -1201,6 +1260,7 @@ int main(int argc, char **argv) {
         }
     }
 
+    bool had_err = app.wl_error;
     cleanup_app(&app);
-    return 0;
+    return had_err ? 1 : 0;
 }
